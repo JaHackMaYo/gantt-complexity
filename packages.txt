@@ -1,3 +1,2 @@
-libssl1.1
 libgdiplus
 libicu-dev
