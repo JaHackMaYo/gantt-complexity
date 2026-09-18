@@ -84,6 +84,17 @@ st.write("Python version:", sys.version)
 st.write("Python executable:", sys.executable)
 st.write("Platform:", platform.platform())
 
+try:
+    import aspose.tasks as tasks
+
+    st.success("Aspose.Tasks initialized successfully.")
+    st.write("Project class:", tasks.Project)
+
+except Exception as exc:
+    st.error(
+        f"Aspose.Tasks initialization failed: "
+        f"{type(exc).__name__}: {exc}"
+    )
 ##
 
 COL_MACRO = "PrismaMacroActivity"
