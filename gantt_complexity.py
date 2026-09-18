@@ -338,13 +338,14 @@ def costruisci_predecessori(project) -> dict[int, list[str]]:
 
 @st.cache_data(show_spinner=False)
 def carica_schedule_mpp(contenuto: bytes, nome_file: str) -> pd.DataFrame:
-    try:
-        import aspose.tasks as tasks
-    except ImportError as exc:
-        raise RuntimeError(
-            "To read .mpp files, install Aspose.Tasks with: "
-            "python -m pip install aspose-tasks"
-        ) from exc
+try:
+    import aspose.tasks as tasks
+except Exception as exc:
+    raise RuntimeError(
+        "Aspose.Tasks is installed but could not be initialized. "
+        f"Error type: {type(exc).__name__}. "
+        f"Error details: {exc}"
+    ) from exc
 
     percorso_temporaneo = None
     try:
