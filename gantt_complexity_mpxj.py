@@ -193,22 +193,28 @@ def _codice_relazione_mpxj(relation_type) -> str:
     return mapping.get(nome, "FI")
 
 
-def _lag_giorni_mpxj(relation) -> float:
+def _lag_giorni_mpxj(relation, project) -> float:
+    """Converte il lag MPXJ in giorni usando i parametri calendario del progetto."""
     try:
         lag = relation.getLag()
         if lag is None:
             return 0.0
-        valore = float(lag.getDuration())
-        unita = str(lag.getUnits()).upper()
-        if "MINUTE" in unita:
-            return valore / 480.0
-        if "HOUR" in unita:
-            return valore / 8.0
-        if "WEEK" in unita:
-            return valore * 5.0
-        if "MONTH" in unita:
-            return valore * 20.0
-        return valore
+        try:
+            from org.mpxj import TimeUnit
+            convertito = lag.convertUnits(TimeUnit.DAYS, project.getProjectProperties())
+            return float(convertito.getDuration())
+        except Exception:
+            valore = float(lag.getDuration())
+            unita = str(lag.getUnits()).upper()
+            if "MINUTE" in unita:
+                return valore / 480.0
+            if "HOUR" in unita:
+                return valore / 8.0
+            if "WEEK" in unita:
+                return valore * 5.0
+            if "MONTH" in unita:
+                return valore * 20.0
+            return valore
     except Exception:
         return 0.0
 
@@ -245,33 +251,71 @@ def _prisma_macro_mpxj(project, task) -> str:
     return fallback or "Unclassified"
 
 
-def _predecessori_mpxj(project) -> dict[int, list[str]]:
+def _predecessori_mpxj(project) -> tuple[dict[int, list[str]], list[dict]]:
+    """
+    Estrae le dipendenze usando i metodi espliciti MPXJ:
+    getPredecessorTask() e getSuccessorTask().
+
+    Non usa più getSourceTask()/getTargetTask(), perché in MPXJ recenti sono
+    deprecati e possono portare a interpretare al contrario gli estremi.
+    """
     predecessori = defaultdict(list)
+    dettaglio = []
+    archi_visti = set()
+
     for task in project.getTasks():
-        if task is None or task.getID() is None:
+        if task is None:
             continue
-        succ_id = int(str(task.getID()))
         try:
             relazioni = task.getPredecessors()
         except Exception:
             relazioni = []
+
         for relation in relazioni or []:
             try:
-                pred = relation.getSourceTask()
-                if pred is None or pred.getID() is None:
-                    pred = relation.getTargetTask()
-                if pred is None or pred.getID() is None:
-                    continue
-                pred_id = int(str(pred.getID()))
-                if pred_id == succ_id:
-                    continue
-                relazione = _codice_relazione_mpxj(relation.getType())
-                lag = formatta_lag(_lag_giorni_mpxj(relation))
-                testo = str(pred_id) if relazione == "FI" and not lag else f"{pred_id}{relazione}{lag}"
-                predecessori[succ_id].append(testo)
+                pred = relation.getPredecessorTask()
+                succ = relation.getSuccessorTask()
             except Exception:
+                # Compatibilità con eventuali versioni MPXJ meno recenti.
+                try:
+                    pred = relation.getSourceTask()
+                    succ = relation.getTargetTask()
+                except Exception:
+                    continue
+
+            if pred is None or succ is None:
                 continue
-    return predecessori
+            if pred.getID() is None or succ.getID() is None:
+                continue
+
+            pred_id = int(str(pred.getID()))
+            succ_id = int(str(succ.getID()))
+            if pred_id == succ_id:
+                continue
+
+            relazione = _codice_relazione_mpxj(relation.getType())
+            lag_giorni = _lag_giorni_mpxj(relation, project)
+            chiave = (pred_id, succ_id, relazione, round(lag_giorni, 8))
+            if chiave in archi_visti:
+                continue
+            archi_visti.add(chiave)
+
+            lag_testo = formatta_lag(lag_giorni)
+            testo = (
+                str(pred_id)
+                if relazione == "FI" and not lag_testo
+                else f"{pred_id}{relazione}{lag_testo}"
+            )
+            predecessori[succ_id].append(testo)
+            dettaglio.append({
+                "Predecessore": str(pred_id),
+                "Successore": str(succ_id),
+                "Relazione": relazione,
+                "Lag giorni": lag_giorni,
+                "Testo predecessore": testo,
+            })
+
+    return predecessori, dettaglio
 
 
 @st.cache_data(show_spinner=False)
@@ -303,7 +347,7 @@ def carica_schedule_mpp(contenuto: bytes, nome_file: str) -> pd.DataFrame:
             percorso_temporaneo = Path(tmp.name)
 
         project = UniversalProjectReader().read(str(percorso_temporaneo))
-        predecessori = _predecessori_mpxj(project)
+        predecessori, dettaglio_dipendenze = _predecessori_mpxj(project)
         righe = []
         numero_summary_escluse = 0
 
@@ -342,6 +386,8 @@ def carica_schedule_mpp(contenuto: bytes, nome_file: str) -> pd.DataFrame:
         df.loc[df[COL_MACRO] == "", COL_MACRO] = "Unclassified"
         df.attrs["summary_escluse"] = numero_summary_escluse
         df.attrs["lettore_mpp"] = "MPXJ"
+        df.attrs["dipendenze_mpxj"] = len(dettaglio_dipendenze)
+        df.attrs["dettaglio_dipendenze_mpxj"] = dettaglio_dipendenze
         return df
     except RuntimeError:
         raise
@@ -359,6 +405,9 @@ def crea_excel_schedule_estratto(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="data", index=False)
+        dettaglio = pd.DataFrame(df.attrs.get("dettaglio_dipendenze_mpxj", []))
+        if not dettaglio.empty:
+            dettaglio.to_excel(writer, sheet_name="Dipendenze MPXJ", index=False)
         ws = writer.sheets["data"]
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
@@ -1184,7 +1233,8 @@ def main() -> None:
             with st.spinner("Reading Microsoft Project file directly with MPXJ..."):
                 df_completo = carica_schedule_mpp(contenuto, file_schedule.name)
             st.sidebar.success(
-                f"MPP read with MPXJ: {len(df_completo)} tasks extracted."
+                f"MPP read with MPXJ: {len(df_completo)} tasks extracted; "
+                f"{int(df_completo.attrs.get('dipendenze_mpxj', 0))} dependencies extracted."
             )
             st.sidebar.download_button(
                 "Download MPP extraction as Excel",
