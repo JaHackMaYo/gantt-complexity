@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 # Required by Aspose.Tasks' embedded .NET Core 3.1 runtime
 # on Linux environments where the installed ICU version is not recognized.
 os.environ["DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"] = "1"
