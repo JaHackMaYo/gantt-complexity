@@ -77,6 +77,12 @@ with st.sidebar.expander("Aspose diagnostics"):
 
     st.write("Python executable:", sys.executable)
 
+import platform
+import sys
+
+st.write("Python version:", sys.version)
+st.write("Python executable:", sys.executable)
+st.write("Platform:", platform.platform())
 
 ##
 
