@@ -3,4 +3,5 @@ pandas
 openpyxl
 networkx
 plotly
-aspose-tasks==26.8.0
+mpxj
+JPype1
