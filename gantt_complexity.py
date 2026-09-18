@@ -34,6 +34,52 @@ _avvia_streamlit_se_necessario()
 
 import streamlit as st
 
+
+##
+
+import importlib.metadata
+import importlib.util
+import sys
+
+with st.sidebar.expander("Aspose diagnostics"):
+    try:
+        distribution = importlib.metadata.distribution("aspose-tasks")
+
+        st.write("Distribution found:", distribution.metadata["Name"])
+        st.write("Version:", distribution.version)
+
+        installed_files = [
+            str(file)
+            for file in (distribution.files or [])
+            if "aspose" in str(file).lower()
+        ]
+
+        st.write("Installed files:")
+        st.code("\n".join(installed_files[:100]))
+
+    except Exception as exc:
+        st.error(
+            f"Distribution check failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    st.write(
+        "aspose namespace:",
+        importlib.util.find_spec("aspose")
+    )
+
+    st.write(
+        "aspose.tasks module:",
+        importlib.util.find_spec("aspose.tasks")
+        if importlib.util.find_spec("aspose") is not None
+        else None
+    )
+
+    st.write("Python executable:", sys.executable)
+
+
+##
+
 COL_MACRO = "PrismaMacroActivity"
 COL_ID = "ID"
 COL_PREDECESSORI = "Predecessori"
