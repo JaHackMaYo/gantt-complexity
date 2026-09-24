@@ -893,20 +893,36 @@ def crea_grafo_ridondanza(
         fig.add_trace(go.Scatter(
             x=edge_x, y=edge_y, mode="text", text=edge_text,
             textfont=dict(size=12, color="#92400e", family="Arial Black"),
-            hoverinfo="skip", showlegend=False, name="Relationship types",
+            hoverinfo="skip",
+            showlegend=True,
+            visible=True if mostra_tipologie_legame else "legendonly",
+            name="Relationship types",
         ))
     node_ids = list(sotto.nodes)
     colors = ["#dc2626" if n in {origine, destinazione} else "#2563eb" for n in node_ids]
-    node_text = [
-        f"{n}<br>{grafo.nodes[n].get('nome', '')}" if mostra_nomi_attivita else str(n)
-        for n in node_ids
+    hover_nodi = [
+        f"{n} - {grafo.nodes[n].get('nome', '')}" for n in node_ids
     ]
     fig.add_trace(go.Scatter(
-        x=[pos[n][0] for n in node_ids], y=[pos[n][1] for n in node_ids],
-        mode="markers+text", text=node_text, textposition="middle center",
+        x=[pos[n][0] for n in node_ids],
+        y=[pos[n][1] for n in node_ids],
+        mode="markers",
+        hovertext=hover_nodi,
+        hoverinfo="text",
+        marker=dict(size=28, color=colors, line=dict(color="white", width=1)),
+        name="Tasks",
+    ))
+    fig.add_trace(go.Scatter(
+        x=[pos[n][0] for n in node_ids],
+        y=[pos[n][1] for n in node_ids],
+        mode="text",
+        text=[f"{n}<br>{grafo.nodes[n].get('nome', '')}" for n in node_ids],
+        textposition="middle center",
         textfont=dict(size=12, color="#0f172a", family="Arial Black"),
-        hovertext=[f"{n} - {grafo.nodes[n].get('nome', '')}" for n in node_ids], hoverinfo="text",
-        marker=dict(size=28, color=colors, line=dict(color="white", width=1)), name="Tasks",
+        hoverinfo="skip",
+        showlegend=True,
+        visible=True if mostra_nomi_attivita else "legendonly",
+        name="Task names",
     ))
     altezza_grafo = min(1200, max(650, 500 + sotto.number_of_nodes() * 18))
     fig.update_layout(
@@ -914,6 +930,9 @@ def crea_grafo_ridondanza(
         title=f"Direct link vs. all {len(percorsi)} indirect paths",
         xaxis=dict(visible=False), yaxis=dict(visible=False),
         legend=dict(orientation="h", y=-0.08),
+        legend_itemclick="toggle",
+        legend_itemdoubleclick="toggleothers",
+        uirevision=f"redundancy-{origine}-{destinazione}",
     )
     return fig
 
@@ -1327,9 +1346,9 @@ def main() -> None:
         etichette_finali = {
             (
                 f"{r.ID} - {r.Nome} | "
-                f"End nodessh: {pd.Timestamp(r.Fine):%d/%m/%Y}"
+                f"Finish: {pd.Timestamp(r.Fine):%d/%m/%Y}"
                 if pd.notna(r.Fine)
-                else f"{r.ID} - {r.Nome} | End nodessh: not available"
+                else f"{r.ID} - {r.Nome} | Finish: not available"
             ): r.ID
             for r in opzioni_finali.itertuples(index=False)
         }
@@ -1725,20 +1744,28 @@ def main() -> None:
             )
             # Costruisce una chiave univoca condivisa tra tabella e selectbox.
             opzioni_rid = {
-                f"{r.Predecessor} → {r.Successor} | {r.Status}": (
+                f"{r.Predecessor} - {r.Successor}": (
                     str(r.Predecessor), str(r.Successor)
                 )
                 for r in tabella_rid.itertuples(index=False)
             }
-            etichette_rid = list(opzioni_rid.keys())
+            etichette_rid = sorted(
+                opzioni_rid.keys(),
+                key=lambda etichetta: tuple(
+                    int(parte.strip()) if parte.strip().isdigit() else parte.strip()
+                    for parte in etichetta.split("-", maxsplit=1)
+                ),
+            )
 
-            # Tabella mantenuta in sola visualizzazione. La scelta del legame
-            # avviene esclusivamente dalla selectbox sottostante, evitando rerun
-            # aggiuntivi e stato persistente generati da on_select="rerun".
-            st.dataframe(
+            # Click rapido sulla tabella. La firma della riga evita che una
+            # selezione persistente venga riapplicata a ogni rerun di Streamlit.
+            evento_tabella_rid = st.dataframe(
                 tabella_rid_visualizzata,
                 use_container_width=True,
                 hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="tabella_ridondanze_selezionabile",
                 column_config={
                     "Number of alternative paths": st.column_config.NumberColumn(format="localized"),
                     "Paths removed by deleting the link": st.column_config.NumberColumn(format="localized"),
@@ -1746,6 +1773,26 @@ def main() -> None:
                     "Lag days": st.column_config.NumberColumn(format="%.2f"),
                 },
             )
+            righe_selezionate = list(evento_tabella_rid.selection.rows)
+            if righe_selezionate:
+                indice_riga = int(righe_selezionate[0])
+                if 0 <= indice_riga < len(tabella_rid):
+                    riga = tabella_rid.iloc[indice_riga]
+                    etichetta_riga = f"{riga['Predecessor']} - {riga['Successor']}"
+                    firma_riga = (
+                        filtro_stato,
+                        str(riga['Predecessor']),
+                        str(riga['Successor']),
+                    )
+                    if (
+                        firma_riga != st.session_state.get(
+                            "ridondanza_ultima_riga_tabella"
+                        )
+                        and etichetta_riga in opzioni_rid
+                    ):
+                        st.session_state["ridondanza_link_selezionato"] = etichetta_riga
+                        st.session_state["ridondanza_ultima_riga_tabella"] = firma_riga
+                        st.rerun()
 
             # Pulisce un'eventuale selezione non più valida dopo il filtro stato.
             valore_corrente = st.session_state.get("ridondanza_link_selezionato")
@@ -1764,7 +1811,7 @@ def main() -> None:
                 "Select a link to compare it with the indirect path",
                 etichette_rid,
                 index=None,
-                placeholder="Choose predecessor → successor",
+                placeholder="Type or choose predecessor - successor",
                 key="ridondanza_link_selezionato",
             )
             if selezione_rid:
@@ -1773,35 +1820,27 @@ def main() -> None:
                     grafo, origine_rid, destinazione_rid
                 )
                 st.info(
-                    f"Direct link {origine_rid} → {destinazione_rid}: "
+                    f"Direct link {origine_rid} - {destinazione_rid}: "
                     f"{len(percorsi_alternativi):,} indirect alternative path(s).".replace(",", ".")
                 )
-                controllo_nomi, controllo_legami, controllo_shift = st.columns(3)
-                with controllo_nomi:
-                    mostra_nomi_ridondanza = st.checkbox(
-                        "Show task names in redundancy graph",
-                        value=True,
-                        key="ridondanza_mostra_nomi",
-                    )
-                with controllo_legami:
-                    mostra_legami_ridondanza = st.checkbox(
-                        "Show relationship types in redundancy graph",
-                        value=True,
-                        key="ridondanza_mostra_legami",
-                    )
-                with controllo_shift:
-                    shift_verticale_ridondanza = st.slider(
-                        "Vertical node shift",
-                        min_value=0.0,
-                        max_value=1.5,
-                        value=0.45,
-                        step=0.05,
-                        key="ridondanza_shift_verticale",
-                        help=(
-                            "Offsets intermediate tasks on the Y axis to avoid "
-                            "perfect alignment and make overlapping links clearer."
-                        ),
-                    )
+                st.caption(
+                    "Click the legend items to show or hide tasks, task names, "
+                    "relationship types, indirect paths, or the suspicious direct link."
+                )
+                shift_verticale_ridondanza = st.slider(
+                    "Vertical node shift",
+                    min_value=0.0,
+                    max_value=1.5,
+                    value=0.45,
+                    step=0.05,
+                    key="ridondanza_shift_verticale",
+                    help=(
+                        "Offsets intermediate tasks on the Y axis to avoid "
+                        "perfect alignment and make overlapping links clearer."
+                    ),
+                )
+                mostra_nomi_ridondanza = True
+                mostra_legami_ridondanza = True
                 st.plotly_chart(
                     crea_grafo_ridondanza(
                         grafo,
@@ -1815,8 +1854,6 @@ def main() -> None:
                     use_container_width=True,
                     key=(
                         f"ridondanza_grafo_{origine_rid}_{destinazione_rid}_"
-                        f"{int(mostra_nomi_ridondanza)}_"
-                        f"{int(mostra_legami_ridondanza)}_"
                         f"{shift_verticale_ridondanza:.2f}"
                     ),
                     config={"displaylogo": False, "responsive": True},
