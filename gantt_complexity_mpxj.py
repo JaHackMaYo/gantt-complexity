@@ -865,19 +865,57 @@ def aggiungi_indicatori_ridondanza_ranking(
     return risultato
 
 
-def crea_grafo_ridondanza(
+def elenca_percorsi_alternativi(
     grafo: nx.DiGraph, origine: str, destinazione: str
-) -> go.Figure:
-    """Evidenzia il link diretto in rosso e un percorso alternativo in blu."""
+) -> list[list[str]]:
+    """Elenca tutti i percorsi indiretti dopo aver escluso il link diretto."""
+    if origine not in grafo or destinazione not in grafo:
+        return []
     test = grafo.copy()
-    test.remove_edge(origine, destinazione)
-    percorso = nx.shortest_path(test, origine, destinazione)
-    archi_percorso = set(zip(percorso[:-1], percorso[1:]))
-    nodi = set(percorso) | {origine, destinazione}
-    for n in list(nodi):
-        nodi.update(grafo.predecessors(n))
-        nodi.update(grafo.successors(n))
-    sotto = grafo.subgraph(nodi).copy()
+    if test.has_edge(origine, destinazione):
+        test.remove_edge(origine, destinazione)
+    if not nx.has_path(test, origine, destinazione):
+        return []
+    return [list(percorso) for percorso in nx.all_simple_paths(test, origine, destinazione)]
+
+
+def riepiloga_nodi_percorsi(
+    grafo: nx.DiGraph, percorsi: list[list[str]], origine: str, destinazione: str
+) -> pd.DataFrame:
+    """Calcola quante alternative contengono ciascun nodo intermedio."""
+    totale = len(percorsi)
+    conteggi = defaultdict(int)
+    for percorso in percorsi:
+        for nodo in set(percorso[1:-1]):
+            conteggi[nodo] += 1
+    righe = []
+    for nodo, conteggio in conteggi.items():
+        righe.append({
+            "Task ID": nodo,
+            "Task name": grafo.nodes[nodo].get("nome", ""),
+            "Paths containing task": conteggio,
+            "Presence pct": conteggio / totale * 100 if totale else 0.0,
+        })
+    return pd.DataFrame(righe).sort_values(
+        ["Paths containing task", "Task ID"], ascending=[False, True]
+    ) if righe else pd.DataFrame(columns=[
+        "Task ID", "Task name", "Paths containing task", "Presence pct"
+    ])
+
+
+def crea_grafo_ridondanza(
+    grafo: nx.DiGraph, origine: str, destinazione: str,
+    percorsi: list[list[str]] | None = None,
+) -> go.Figure:
+    """Mostra il link diretto e l'unione di tutti i percorsi indiretti."""
+    percorsi = percorsi if percorsi is not None else elenca_percorsi_alternativi(
+        grafo, origine, destinazione
+    )
+    archi_alternativi = {
+        (u, v) for percorso in percorsi for u, v in zip(percorso[:-1], percorso[1:])
+    }
+    nodi_alternativi = {n for percorso in percorsi for n in percorso}
+    sotto = grafo.subgraph(nodi_alternativi | {origine, destinazione}).copy()
     try:
         generazioni = list(nx.topological_generations(sotto))
         pos = {}
@@ -888,11 +926,9 @@ def crea_grafo_ridondanza(
                 pos[n] = (x, centro - i)
     except Exception:
         pos = nx.spring_layout(sotto, seed=42)
-
     fig = go.Figure()
     gruppi = [
-        ("Context", "#cbd5e1", "solid", [(u, v) for u, v in sotto.edges if (u, v) not in archi_percorso and (u, v) != (origine, destinazione)]),
-        ("Indirect path", "#2563eb", "solid", list(archi_percorso)),
+        ("All indirect paths", "#2563eb", "solid", list(archi_alternativi)),
         ("Suspicious direct link", "#dc2626", "dash", [(origine, destinazione)]),
     ]
     for nome, colore, dash, edges in gruppi:
@@ -904,10 +940,10 @@ def crea_grafo_ridondanza(
             ys += [pos[u][1], pos[v][1], None]
         fig.add_trace(go.Scatter(
             x=xs, y=ys, mode="lines", name=nome, hoverinfo="skip",
-            line=dict(color=colore, width=4 if nome != "Context" else 1, dash=dash),
+            line=dict(color=colore, width=4, dash=dash),
         ))
     node_ids = list(sotto.nodes)
-    colors = ["#dc2626" if n in {origine, destinazione} else "#2563eb" if n in percorso else "#94a3b8" for n in node_ids]
+    colors = ["#dc2626" if n in {origine, destinazione} else "#2563eb" for n in node_ids]
     fig.add_trace(go.Scatter(
         x=[pos[n][0] for n in node_ids], y=[pos[n][1] for n in node_ids],
         mode="markers+text", text=[str(n) for n in node_ids], textposition="middle center",
@@ -916,12 +952,11 @@ def crea_grafo_ridondanza(
     ))
     fig.update_layout(
         height=600, plot_bgcolor="white", margin=dict(l=10, r=10, t=45, b=60),
-        title="Direct link vs. indirect path",
+        title=f"Direct link vs. all {len(percorsi)} indirect paths",
         xaxis=dict(visible=False), yaxis=dict(visible=False),
         legend=dict(orientation="h", y=-0.08),
     )
     return fig
-
 
 def crea_excel_ridondanze(ridondanze: pd.DataFrame) -> bytes:
     output = io.BytesIO()
@@ -1745,18 +1780,57 @@ def main() -> None:
             )
             if selezione_rid:
                 origine_rid, destinazione_rid = opzioni_rid[selezione_rid]
+                percorsi_alternativi = elenca_percorsi_alternativi(
+                    grafo, origine_rid, destinazione_rid
+                )
+                st.info(
+                    f"Direct link {origine_rid} → {destinazione_rid}: "
+                    f"{len(percorsi_alternativi):,} indirect alternative path(s).".replace(",", ".")
+                )
                 st.plotly_chart(
-                    crea_grafo_ridondanza(grafo, origine_rid, destinazione_rid),
+                    crea_grafo_ridondanza(
+                        grafo, origine_rid, destinazione_rid, percorsi_alternativi
+                    ),
                     use_container_width=True,
                 )
-                dettaglio = ridondanze[
-                    (ridondanze["Predecessor"] == origine_rid)
-                    & (ridondanze["Successor"] == destinazione_rid)
-                ].iloc[0]
-                st.info(
-                    f"Displayed alternative path: {dettaglio['Alternative path']}. "
-                    f"Total indirect paths between the two tasks: "
-                    f"{int(dettaglio['Number of alternative paths']):,}.".replace(",", ".")
+                tabella_percorsi = pd.DataFrame([
+                    {
+                        "#": indice,
+                        "Alternative path": " → ".join(map(str, percorso)),
+                        "Steps": len(percorso) - 1,
+                    }
+                    for indice, percorso in enumerate(percorsi_alternativi, start=1)
+                ])
+                st.subheader("All alternative indirect paths")
+                st.dataframe(
+                    tabella_percorsi,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.subheader("Tasks involved in the alternative paths")
+                frequenza_nodi = riepiloga_nodi_percorsi(
+                    grafo, percorsi_alternativi, origine_rid, destinazione_rid
+                )
+                st.dataframe(
+                    frequenza_nodi,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Presence pct": st.column_config.NumberColumn(format="%.1f%%"),
+                        "Paths containing task": st.column_config.NumberColumn(format="localized"),
+                    },
+                )
+                output_dettaglio = io.BytesIO()
+                with pd.ExcelWriter(output_dettaglio, engine="openpyxl") as writer:
+                    tabella_percorsi.to_excel(writer, sheet_name="Alternative paths", index=False)
+                    frequenza_nodi.to_excel(writer, sheet_name="Task frequency", index=False)
+                output_dettaglio.seek(0)
+                st.download_button(
+                    "Download selected redundancy details",
+                    data=output_dettaglio.getvalue(),
+                    file_name=f"redundancy_{origine_rid}_{destinazione_rid}_all_paths.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
                 )
 
     with tab_confronto:
