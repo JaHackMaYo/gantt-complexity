@@ -63,6 +63,18 @@ RELATION_COLORS = {
 }
 
 
+def formatta_lag(giorni: float) -> str:
+    """Formatta un lag espresso in giorni per tabelle e grafici."""
+    try:
+        giorni = float(giorni or 0)
+    except (TypeError, ValueError):
+        giorni = 0.0
+    if abs(giorni) < 1e-9:
+        return ""
+    valore = int(giorni) if giorni.is_integer() else round(giorni, 2)
+    return f"{'+' if giorni > 0 else ''}{valore} g"
+
+
 def normalizza_id(value) -> str | None:
     if pd.isna(value):
         return None
