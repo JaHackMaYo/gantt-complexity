@@ -702,15 +702,30 @@ def aggiungi_indicatori_ridondanza_ranking(
 def elenca_percorsi_alternativi(
     grafo: nx.DiGraph, origine: str, destinazione: str
 ) -> list[list[str]]:
-    """Elenca tutti i percorsi indiretti dopo aver escluso il link diretto."""
+    """Elenca i percorsi indiretti lavorando solo sul sottografo pertinente.
+
+    La sola rimozione dell'arco diretto non basta: ``all_simple_paths`` può
+    esplorare molti rami discendenti dall'origine che non conducono mai alla
+    destinazione. Il sottografo viene quindi ristretto ai nodi che sono sia
+    raggiungibili dall'origine sia antenati della destinazione.
+    """
     if origine not in grafo or destinazione not in grafo:
         return []
+
     vista = _vista_senza_arco(grafo, origine, destinazione)
-    if not nx.has_path(vista, origine, destinazione):
+    raggiungibili = nx.descendants(vista, origine) | {origine}
+    antenati = nx.ancestors(vista, destinazione) | {destinazione}
+    nodi_utili = raggiungibili & antenati
+
+    if origine not in nodi_utili or destinazione not in nodi_utili:
         return []
+
+    sotto_percorsi = vista.subgraph(nodi_utili)
     return [
         list(percorso)
-        for percorso in nx.all_simple_paths(vista, origine, destinazione)
+        for percorso in nx.all_simple_paths(
+            sotto_percorsi, origine, destinazione
+        )
     ]
 
 
