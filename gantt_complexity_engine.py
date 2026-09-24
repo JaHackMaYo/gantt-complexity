@@ -758,6 +758,7 @@ def crea_grafo_ridondanza(
     percorsi: list[list[str]] | None = None,
     mostra_nomi_attivita: bool = True,
     mostra_tipologie_legame: bool = True,
+    shift_verticale: float = 0.45,
 ) -> go.Figure:
     """Mostra il link diretto e l'unione di tutti i percorsi indiretti."""
     percorsi = percorsi if percorsi is not None else elenca_percorsi_alternativi(
@@ -818,6 +819,25 @@ def crea_grafo_ridondanza(
                 pos[nodo] = (
                     pos[nodo][0],
                     centro + posizione_regolare,
+                )
+
+        # Applica uno sfalsamento verticale deterministico ai nodi intermedi.
+        # Anche quando una generazione contiene un solo nodo, la sequenza non
+        # resta perfettamente orizzontale: i legami risultano quindi distinguibili.
+        if shift_verticale > 0:
+            nodi_intermedi = sorted(
+                (n for n in sotto.nodes if n not in {origine, destinazione}),
+                key=lambda n: (livello_nodo.get(n, 0), str(n)),
+            )
+            for indice, nodo in enumerate(nodi_intermedi):
+                livello = int(livello_nodo.get(nodo, 0))
+                verso = 1.0 if (livello + indice) % 2 == 0 else -1.0
+                # Una piccola modulazione evita che diversi livelli ricadano
+                # sempre sulle stesse due ordinate.
+                modulazione = 1.0 + 0.30 * (livello % 3)
+                pos[nodo] = (
+                    pos[nodo][0],
+                    pos[nodo][1] + verso * shift_verticale * modulazione,
                 )
 
         # Origine e destinazione restano centrate alle estremità del flusso.
@@ -1756,7 +1776,7 @@ def main() -> None:
                     f"Direct link {origine_rid} → {destinazione_rid}: "
                     f"{len(percorsi_alternativi):,} indirect alternative path(s).".replace(",", ".")
                 )
-                controllo_nomi, controllo_legami = st.columns(2)
+                controllo_nomi, controllo_legami, controllo_shift = st.columns(3)
                 with controllo_nomi:
                     mostra_nomi_ridondanza = st.checkbox(
                         "Show task names in redundancy graph",
@@ -1769,6 +1789,19 @@ def main() -> None:
                         value=True,
                         key="ridondanza_mostra_legami",
                     )
+                with controllo_shift:
+                    shift_verticale_ridondanza = st.slider(
+                        "Vertical node shift",
+                        min_value=0.0,
+                        max_value=1.5,
+                        value=0.45,
+                        step=0.05,
+                        key="ridondanza_shift_verticale",
+                        help=(
+                            "Offsets intermediate tasks on the Y axis to avoid "
+                            "perfect alignment and make overlapping links clearer."
+                        ),
+                    )
                 st.plotly_chart(
                     crea_grafo_ridondanza(
                         grafo,
@@ -1777,12 +1810,14 @@ def main() -> None:
                         percorsi_alternativi,
                         mostra_nomi_attivita=mostra_nomi_ridondanza,
                         mostra_tipologie_legame=mostra_legami_ridondanza,
+                        shift_verticale=shift_verticale_ridondanza,
                     ),
                     use_container_width=True,
                     key=(
                         f"ridondanza_grafo_{origine_rid}_{destinazione_rid}_"
                         f"{int(mostra_nomi_ridondanza)}_"
-                        f"{int(mostra_legami_ridondanza)}"
+                        f"{int(mostra_legami_ridondanza)}_"
+                        f"{shift_verticale_ridondanza:.2f}"
                     ),
                     config={"displaylogo": False, "responsive": True},
                 )
