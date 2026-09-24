@@ -159,53 +159,64 @@ def carica_schedule(contenuto: bytes, foglio: str) -> pd.DataFrame:
     return df
 
 
-def testo_enum(value) -> str:
-    return str(value).split(".")[-1].upper().replace(" ", "_")
+def _java_value(value, default=None):
+    """Converte in modo tollerante un valore Java/JPype in un valore Python."""
+    if value is None:
+        return default
+    text = str(value).strip()
+    return default if text in {"", "None", "null"} else text
 
 
-def codice_relazione(link_type) -> str:
-    """Converte TaskLinkType Aspose, che in Python viene esposto come intero."""
-    valore = str(link_type).strip()
-    mapping_numerico = {
-        "0": "FF",  # End nodessh-to-End nodessh
-        "1": "FI",  # End nodessh-to-Start
-        "2": "IF",  # Start-to-End nodessh
-        "3": "II",  # Start-to-Start
+def _java_datetime(value):
+    """Converte LocalDate/LocalDateTime MPXJ in Timestamp pandas."""
+    if value is None:
+        return pd.NaT
+    try:
+        return pd.Timestamp(
+            int(value.getYear()), int(value.getMonthValue()), int(value.getDayOfMonth()),
+            int(value.getHour()) if hasattr(value, "getHour") else 0,
+            int(value.getMinute()) if hasattr(value, "getMinute") else 0,
+            int(value.getSecond()) if hasattr(value, "getSecond") else 0,
+        )
+    except Exception:
+        return pd.to_datetime(str(value), errors="coerce")
+
+
+def _codice_relazione_mpxj(relation_type) -> str:
+    nome = str(relation_type or "FINISH_START").upper().replace("-", "_")
+    mapping = {
+        "FINISH_START": "FI", "FINISH_TO_START": "FI", "FS": "FI",
+        "START_START": "II", "START_TO_START": "II", "SS": "II",
+        "FINISH_FINISH": "FF", "FINISH_TO_FINISH": "FF",
+        "START_FINISH": "IF", "START_TO_FINISH": "IF", "SF": "IF",
     }
-    if valore in mapping_numerico:
-        return mapping_numerico[valore]
-
-    nome = testo_enum(link_type)
-    return {
-        "FINISH_TO_START": "FI",
-        "START_TO_START": "II",
-        "FINISH_TO_FINISH": "FF",
-        "START_TO_FINISH": "IF",
-    }.get(nome, nome)
+    return mapping.get(nome, "FI")
 
 
-def numero_lag_giorni(link) -> float:
-    """
-    Converte il lag Aspose in giorni lavorativi Project.
-    Nel file diagnosticato lag_format=4 (giorni) e link_lag è espresso
-    in decimi di minuto: 4.800 unità corrispondono a 1 giorno da 8 ore.
-    """
+def _lag_giorni_mpxj(relation, project) -> float:
+    """Converte il lag MPXJ in giorni usando i parametri calendario del progetto."""
     try:
-        lag_raw = float(link.link_lag)
-        lag_format = str(link.lag_format).strip()
-        if lag_format == "4":
-            return lag_raw / 4800.0
-    except Exception:
-        pass
-
-    # Fallback per formati diversi dai giorni.
-    try:
-        return float(link.link_lag_time_span.total_seconds()) / 3600.0 / 8.0
-    except Exception:
-        try:
-            return float(link.link_lag) / 4800.0
-        except Exception:
+        lag = relation.getLag()
+        if lag is None:
             return 0.0
+        try:
+            from org.mpxj import TimeUnit
+            convertito = lag.convertUnits(TimeUnit.DAYS, project.getProjectProperties())
+            return float(convertito.getDuration())
+        except Exception:
+            valore = float(lag.getDuration())
+            unita = str(lag.getUnits()).upper()
+            if "MINUTE" in unita:
+                return valore / 480.0
+            if "HOUR" in unita:
+                return valore / 8.0
+            if "WEEK" in unita:
+                return valore * 5.0
+            if "MONTH" in unita:
+                return valore * 20.0
+            return valore
+    except Exception:
+        return 0.0
 
 
 def formatta_lag(giorni: float) -> str:
@@ -215,177 +226,173 @@ def formatta_lag(giorni: float) -> str:
     return f"{'+' if giorni > 0 else ''}{valore} g"
 
 
-def valore_attributo_sicuro(attribute) -> str:
-    """Legge solo proprietà compatibili con il tipo concreto dell'attributo."""
-    for nome in ("value", "text_value", "numeric_value"):
-        try:
-            valore = getattr(attribute, nome)
-        except (AttributeError, RuntimeError):
-            continue
-        if valore is not None and str(valore).strip():
-            return str(valore).strip()
-    return ""
-
-
-def definizioni_attributi(project) -> dict[str, object]:
-    risultato = {}
+def _prisma_macro_mpxj(project, task) -> str:
+    """Cerca il campo personalizzato Prisma Macro Activity; fallback Text10."""
+    campi = []
     try:
-        for definition in project.extended_attributes:
-            try:
-                risultato[str(definition.field_id)] = definition
-            except Exception:
-                continue
+        campi = list(project.getCustomFields())
     except Exception:
         pass
-    return risultato
+    fallback = ""
+    for field in campi:
+        try:
+            alias = str(field.getAlias() or "")
+            field_type = field.getFieldType()
+            field_name = str(field_type or "")
+            chiave = f"{alias} {field_name}".lower().replace(" ", "").replace("_", "")
+            valore = task.getCachedValue(field_type)
+            valore = "" if valore is None else str(valore).strip()
+            if "prismamacroactivity" in chiave and valore:
+                return valore
+            if "text10" in chiave and valore and not fallback:
+                fallback = valore
+        except Exception:
+            continue
+    return fallback or "Unclassified"
 
 
-def risolvi_lookup(definition, attribute, valore_grezzo: str) -> str:
-    """Traduce l'eventuale GUID/valore di lookup nel testo leggibile."""
-    if definition is None:
-        return valore_grezzo
+def _predecessori_mpxj(project) -> tuple[dict[int, list[str]], list[dict]]:
+    """
+    Estrae le dipendenze usando i metodi espliciti MPXJ:
+    getPredecessorTask() e getSuccessorTask().
 
-    try:
-        guid_attributo = str(attribute.value_guid or "").strip().lower()
-    except Exception:
-        guid_attributo = ""
+    Non usa più getSourceTask()/getTargetTask(), perché in MPXJ recenti sono
+    deprecati e possono portare a interpretare al contrario gli estremi.
+    """
+    predecessori = defaultdict(list)
+    dettaglio = []
+    archi_visti = set()
 
-    try:
-        for item in definition.value_list:
+    for task in project.getTasks():
+        if task is None:
+            continue
+        try:
+            relazioni = task.getPredecessors()
+        except Exception:
+            relazioni = []
+
+        for relation in relazioni or []:
             try:
-                item_guid = str(item.value_guid or "").strip().lower()
+                pred = relation.getPredecessorTask()
+                succ = relation.getSuccessorTask()
             except Exception:
-                item_guid = ""
-
-            valori = []
-            for nome in ("string_value", "val", "description"):
+                # Compatibilità con eventuali versioni MPXJ meno recenti.
                 try:
-                    valore = getattr(item, nome)
+                    pred = relation.getSourceTask()
+                    succ = relation.getTargetTask()
                 except Exception:
                     continue
-                if valore is not None and str(valore).strip():
-                    valori.append(str(valore).strip())
 
-            if guid_attributo and item_guid == guid_attributo and valori:
-                return valori[0]
-            if valore_grezzo and valore_grezzo in valori:
-                return valori[0]
-    except Exception:
-        pass
+            if pred is None or succ is None:
+                continue
+            if pred.getID() is None or succ.getID() is None:
+                continue
 
-    return valore_grezzo
+            pred_id = int(str(pred.getID()))
+            succ_id = int(str(succ.getID()))
+            if pred_id == succ_id:
+                continue
 
+            relazione = _codice_relazione_mpxj(relation.getType())
+            lag_giorni = _lag_giorni_mpxj(relation, project)
+            chiave = (pred_id, succ_id, relazione, round(lag_giorni, 8))
+            if chiave in archi_visti:
+                continue
+            archi_visti.add(chiave)
 
-def leggi_prisma_macro_activity(project, task) -> str:
-    """Cerca Prisma Macro Activity per alias/nome; fallback sul campo Text10."""
-    definizioni = definizioni_attributi(project)
-    fallback_text10 = ""
+            lag_testo = formatta_lag(lag_giorni)
+            testo = (
+                str(pred_id)
+                if relazione == "FI" and not lag_testo
+                else f"{pred_id}{relazione}{lag_testo}"
+            )
+            predecessori[succ_id].append(testo)
+            dettaglio.append({
+                "Predecessore": str(pred_id),
+                "Successore": str(succ_id),
+                "Relazione": relazione,
+                "Lag giorni": lag_giorni,
+                "Testo predecessore": testo,
+            })
 
-    for attribute in task.extended_attributes:
-        try:
-            field_id = str(attribute.field_id or "")
-        except Exception:
-            field_id = ""
-
-        definition = definizioni.get(field_id)
-        alias = ""
-        field_name = ""
-        if definition is not None:
-            try:
-                alias = str(definition.alias or "").strip()
-            except Exception:
-                pass
-            try:
-                field_name = str(definition.field_name or "").strip()
-            except Exception:
-                pass
-
-        chiave = f"{alias} {field_name}".lower().replace(" ", "").replace("_", "")
-        e_prisma = "prismamacroactivity" in chiave
-        e_text10 = "text10" in field_id.lower() or "text10" in field_name.lower()
-
-        # Non leggere text_value su tutti gli attributi: un attributo Number
-        # solleva InvalidOperationException proprio come nell'errore segnalato.
-        if not (e_prisma or e_text10):
-            continue
-
-        valore = valore_attributo_sicuro(attribute)
-        valore = risolvi_lookup(definition, attribute, valore)
-
-        if e_prisma and valore:
-            return valore
-        if e_text10 and valore and not fallback_text10:
-            fallback_text10 = valore
-
-    return fallback_text10
-
-
-def costruisci_predecessori(project) -> dict[int, list[str]]:
-    predecessori = defaultdict(list)
-    for link in project.task_links:
-        pred = link.pred_task
-        succ = link.succ_task
-        if pred is None or succ is None:
-            continue
-        pred_id = int(pred.id)
-        succ_id = int(succ.id)
-        relazione = codice_relazione(link.link_type)
-        lag = formatta_lag(numero_lag_giorni(link))
-        testo = str(pred_id) if relazione == "FI" and not lag else f"{pred_id}{relazione}{lag}"
-        predecessori[succ_id].append(testo)
-    return predecessori
+    return predecessori, dettaglio
 
 
 @st.cache_data(show_spinner=False)
 def carica_schedule_mpp(contenuto: bytes, nome_file: str) -> pd.DataFrame:
+    """Legge MPP con MPXJ/JPype, senza Aspose e senza dipendenza da libssl1.1."""
     try:
-        import aspose.tasks as tasks
-    except Exception as exc:
+        import jpype
+        import mpxj  # noqa: F401: registra il classpath MPXJ
+    except ImportError as exc:
         raise RuntimeError(
-        "Aspose.Tasks is installed but could not be initialized. "
-        f"Error type: {type(exc).__name__}. "
-        f"Error details: {exc}"
-    ) from exc
+            "Per leggere i file MPP installa: python -m pip install mpxj JPype1"
+        ) from exc
 
     percorso_temporaneo = None
     try:
+        if not jpype.isJVMStarted():
+            try:
+                jpype.startJVM(convertStrings=True)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Impossibile avviare Java. Installa un JDK/JRE 11 o successivo e "
+                    "verifica JAVA_HOME. Dettaglio: " + str(exc)
+                ) from exc
+
+        from org.mpxj.reader import UniversalProjectReader
+
         with tempfile.NamedTemporaryFile(suffix=".mpp", delete=False) as tmp:
             tmp.write(contenuto)
             percorso_temporaneo = Path(tmp.name)
 
-        project = tasks.Project(str(percorso_temporaneo))
-        predecessori = costruisci_predecessori(project)
+        project = UniversalProjectReader().read(str(percorso_temporaneo))
+        predecessori, dettaglio_dipendenze = _predecessori_mpxj(project)
         righe = []
         numero_summary_escluse = 0
-        for task in project.root_task.select_all_child_tasks():
-            task_id = int(task.id)
-            # Aspose include anche la root del progetto (ID 0); l'export Excel
-            # originale contiene invece le sole attività ID 1..N.
+
+        for task in project.getTasks():
+            if task is None or task.getID() is None:
+                continue
+            task_id = int(str(task.getID()))
             if task_id == 0:
                 continue
-            if bool(task.is_summary):
+            try:
+                is_summary = bool(task.getSummary())
+            except Exception:
+                try:
+                    is_summary = bool(task.getChildTasks())
+                except Exception:
+                    is_summary = False
+            if is_summary:
                 numero_summary_escluse += 1
                 continue
+
             righe.append({
-                COL_MACRO: leggi_prisma_macro_activity(project, task),
+                COL_MACRO: _prisma_macro_mpxj(project, task),
                 COL_ID: str(task_id),
                 COL_PREDECESSORI: ";".join(predecessori.get(task_id, [])),
-                COL_NOME: str(task.name or "").strip(),
-                COL_DURATA: str(task.duration or ""),
-                COL_INIZIO: pd.to_datetime(task.start, errors="coerce"),
-                COL_FINE: pd.to_datetime(task.finish, errors="coerce"),
+                COL_NOME: _java_value(task.getName(), ""),
+                COL_DURATA: _java_value(task.getDuration(), ""),
+                COL_INIZIO: _java_datetime(task.getStart()),
+                COL_FINE: _java_datetime(task.getFinish()),
             })
 
         df = pd.DataFrame(righe, columns=[
             COL_MACRO, COL_ID, COL_PREDECESSORI, COL_NOME,
             COL_DURATA, COL_INIZIO, COL_FINE,
         ])
-        df[COL_MACRO] = df[COL_MACRO].fillna("").astype(str).str.strip()
+        df[COL_MACRO] = df[COL_MACRO].fillna("Unclassified").astype(str).str.strip()
         df.loc[df[COL_MACRO] == "", COL_MACRO] = "Unclassified"
         df.attrs["summary_escluse"] = numero_summary_escluse
+        df.attrs["lettore_mpp"] = "MPXJ"
+        df.attrs["dipendenze_mpxj"] = len(dettaglio_dipendenze)
+        df.attrs["dettaglio_dipendenze_mpxj"] = dettaglio_dipendenze
         return df
+    except RuntimeError:
+        raise
     except Exception as exc:
-        raise RuntimeError(f"Unable to read MPP file '{nome_file}': {exc}") from exc
+        raise RuntimeError(f"Unable to read MPP file '{nome_file}' with MPXJ: {exc}") from exc
     finally:
         if percorso_temporaneo is not None:
             try:
@@ -398,6 +405,9 @@ def crea_excel_schedule_estratto(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="data", index=False)
+        dettaglio = pd.DataFrame(df.attrs.get("dettaglio_dipendenze_mpxj", []))
+        if not dettaglio.empty:
+            dettaglio.to_excel(writer, sheet_name="Dipendenze MPXJ", index=False)
         ws = writer.sheets["data"]
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
@@ -572,6 +582,46 @@ def conta_percorsi_tra_nodi_dag(grafo: nx.DiGraph, origine: str, destinazione: s
     return int(conteggi.get(destinazione, 0))
 
 
+def _vista_senza_arco(
+    grafo: nx.DiGraph, origine_esclusa: str, destinazione_esclusa: str
+) -> nx.DiGraph:
+    """Restituisce una vista che esclude un arco senza copiare l'intero grafo."""
+    return nx.subgraph_view(
+        grafo,
+        filter_edge=lambda u, v: not (
+            u == origine_esclusa and v == destinazione_esclusa
+        ),
+    )
+
+
+def conta_percorsi_senza_arco_dag(
+    grafo: nx.DiGraph,
+    origine: str,
+    destinazione: str,
+    arco_escluso: tuple[str, str],
+    ordine_topologico: list[str],
+) -> int:
+    """Conta i percorsi ignorando un arco e riutilizzando l'ordine topologico."""
+    conteggi: dict[str, int] = {origine: 1}
+    avviato = False
+    for nodo in ordine_topologico:
+        if nodo == origine:
+            avviato = True
+            continue
+        if not avviato:
+            continue
+        totale = sum(
+            conteggi.get(predecessore, 0)
+            for predecessore in grafo.predecessors(nodo)
+            if (predecessore, nodo) != arco_escluso
+        )
+        if totale:
+            conteggi[nodo] = totale
+        if nodo == destinazione:
+            break
+    return int(conteggi.get(destinazione, 0))
+
+
 def analizza_legami_ridondanti(grafo: nx.DiGraph) -> pd.DataFrame:
     """
     Individua archi diretti per i quali esiste anche un percorso indiretto.
@@ -594,6 +644,7 @@ def analizza_legami_ridondanti(grafo: nx.DiGraph) -> pd.DataFrame:
         return pd.DataFrame(columns=colonne)
 
     cammini_da_origini, cammini_verso_fini = conta_cammini_dag(grafo)
+    ordine_topologico = list(nx.topological_sort(grafo))
     fini = [n for n in grafo if grafo.out_degree(n) == 0]
     percorsi_totali = sum(cammini_da_origini[n] for n in fini)
     righe = []
@@ -602,15 +653,18 @@ def analizza_legami_ridondanti(grafo: nx.DiGraph) -> pd.DataFrame:
         dati = grafo.edges[origine, destinazione]
         relazione = str(dati.get("relazione", "FI")).upper()
         lag = float(dati.get("lag", 0) or 0)
-        test = grafo.copy()
-        test.remove_edge(origine, destinazione)
-
+        vista = _vista_senza_arco(grafo, origine, destinazione)
         try:
-            percorso = nx.shortest_path(test, origine, destinazione)
+            percorso = nx.shortest_path(vista, origine, destinazione)
         except nx.NetworkXNoPath:
             continue
-
-        alternativi = conta_percorsi_tra_nodi_dag(test, origine, destinazione)
+        alternativi = conta_percorsi_senza_arco_dag(
+            grafo,
+            origine,
+            destinazione,
+            (origine, destinazione),
+            ordine_topologico,
+        )
         eliminati = int(cammini_da_origini[origine] * cammini_verso_fini[destinazione])
         riduzione_pct = eliminati / percorsi_totali * 100 if percorsi_totali else 0.0
 
@@ -861,12 +915,13 @@ def elenca_percorsi_alternativi(
     """Elenca tutti i percorsi indiretti dopo aver escluso il link diretto."""
     if origine not in grafo or destinazione not in grafo:
         return []
-    test = grafo.copy()
-    if test.has_edge(origine, destinazione):
-        test.remove_edge(origine, destinazione)
-    if not nx.has_path(test, origine, destinazione):
+    vista = _vista_senza_arco(grafo, origine, destinazione)
+    if not nx.has_path(vista, origine, destinazione):
         return []
-    return [list(percorso) for percorso in nx.all_simple_paths(test, origine, destinazione)]
+    return [
+        list(percorso)
+        for percorso in nx.all_simple_paths(vista, origine, destinazione)
+    ]
 
 
 def riepiloga_nodi_percorsi(
@@ -1019,7 +1074,7 @@ def crea_grafo_ridondanza(
     altezza_grafo = min(1200, max(650, 500 + sotto.number_of_nodes() * 18))
     fig.update_layout(
         height=altezza_grafo, plot_bgcolor="white", margin=dict(l=20, r=20, t=55, b=70),
-        title=f"Direct link vs. {len(percorsi)} displayed indirect path(s)",
+        title=f"Direct link vs. all {len(percorsi)} indirect paths",
         xaxis=dict(visible=False), yaxis=dict(visible=False),
         legend=dict(orientation="h", y=-0.08),
     )
@@ -1320,7 +1375,7 @@ def main() -> None:
     file_schedule = st.sidebar.file_uploader(
         "Upload schedule",
         type=["mpp", "xlsx", "xlsm"],
-        help="MPP files are read directly with Aspose.Tasks without opening Microsoft Project.",
+        help="MPP files are read directly with MPXJ without opening Microsoft Project.",
     )
 
     if file_schedule is None:
@@ -1332,11 +1387,11 @@ def main() -> None:
 
     try:
         if estensione == ".mpp":
-            with st.spinner("Reading Microsoft Project file directly with Aspose.Tasks..."):
+            with st.spinner("Reading Microsoft Project file directly with MPXJ..."):
                 df_completo = carica_schedule_mpp(contenuto, file_schedule.name)
             st.sidebar.success(
-                f"MPP read with Aspose.Tasks: {len(df_completo)} tasks extracted; "
-                f"{int(df_completo.attrs.get('dipendenze_aspose', 0))} dependencies extracted."
+                f"MPP read with MPXJ: {len(df_completo)} tasks extracted; "
+                f"{int(df_completo.attrs.get('dipendenze_mpxj', 0))} dependencies extracted."
             )
             st.sidebar.download_button(
                 "Download MPP extraction as Excel",
@@ -1896,61 +1951,21 @@ def main() -> None:
                         value=True,
                         key="ridondanza_mostra_legami",
                     )
-
-                percorsi_ordinati = sorted(
-                    percorsi_alternativi,
-                    key=lambda percorso: (len(percorso), tuple(map(str, percorso))),
-                )
-                modalita_grafo = st.radio(
-                    "Redundancy graph view",
-                    ["Single path", "Shortest path", "Longest path", "All paths combined"],
-                    horizontal=True,
-                    key="ridondanza_modalita_grafo",
-                    help=(
-                        "Single path is the clearest view. All paths combined shows the complete "
-                        "alternative network but can be visually dense."
-                    ),
-                )
-                indice_percorso = 0
-                if modalita_grafo == "Single path" and percorsi_ordinati:
-                    etichette_percorsi = [
-                        f"Path {indice}: {len(percorso) - 1} steps | "
-                        + " → ".join(map(str, percorso))
-                        for indice, percorso in enumerate(percorsi_ordinati, start=1)
-                    ]
-                    scelta_percorso = st.selectbox(
-                        "Path displayed in the graph",
-                        etichette_percorsi,
-                        index=0,
-                        key="ridondanza_percorso_visualizzato",
-                    )
-                    indice_percorso = etichette_percorsi.index(scelta_percorso)
-
-                if modalita_grafo == "All paths combined":
-                    percorsi_grafico = percorsi_ordinati
-                elif modalita_grafo == "Longest path":
-                    percorsi_grafico = [max(percorsi_ordinati, key=len)] if percorsi_ordinati else []
-                elif modalita_grafo == "Shortest path":
-                    percorsi_grafico = [min(percorsi_ordinati, key=len)] if percorsi_ordinati else []
-                else:
-                    percorsi_grafico = [percorsi_ordinati[indice_percorso]] if percorsi_ordinati else []
-
                 st.plotly_chart(
                     crea_grafo_ridondanza(
                         grafo,
                         origine_rid,
                         destinazione_rid,
-                        percorsi_grafico,
+                        percorsi_alternativi,
                         mostra_nomi_attivita=mostra_nomi_ridondanza,
                         mostra_tipologie_legame=mostra_legami_ridondanza,
                     ),
                     use_container_width=True,
-                    config={"displaylogo": False, "scrollZoom": True},
                 )
                 tabella_percorsi = pd.DataFrame([
                     {
                         "#": indice,
-                        "Alternative path": " → ".join(map(str, percorso)),
+                        "Shortest alternative path": " → ".join(map(str, percorso)),
                         "Steps": len(percorso) - 1,
                     }
                     for indice, percorso in enumerate(percorsi_alternativi, start=1)
