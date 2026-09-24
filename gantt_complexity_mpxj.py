@@ -906,8 +906,8 @@ def riepiloga_nodi_percorsi(
 def crea_grafo_ridondanza(
     grafo: nx.DiGraph, origine: str, destinazione: str,
     percorsi: list[list[str]] | None = None,
-    mostra_nomi_attivita: bool = False,
-    mostra_tipologie_legame: bool = False,
+    mostra_nomi_attivita: bool = True,
+    mostra_tipologie_legame: bool = True,
 ) -> go.Figure:
     """Mostra il link diretto e l'unione di tutti i percorsi indiretti."""
     percorsi = percorsi if percorsi is not None else elenca_percorsi_alternativi(
@@ -959,7 +959,7 @@ def crea_grafo_ridondanza(
             edge_text.append(etichetta)
         fig.add_trace(go.Scatter(
             x=edge_x, y=edge_y, mode="text", text=edge_text,
-            textfont=dict(size=11, color="#111827"),
+            textfont=dict(size=12, color="#92400e", family="Arial Black"),
             hoverinfo="skip", showlegend=False, name="Relationship types",
         ))
     node_ids = list(sotto.nodes)
@@ -971,6 +971,7 @@ def crea_grafo_ridondanza(
     fig.add_trace(go.Scatter(
         x=[pos[n][0] for n in node_ids], y=[pos[n][1] for n in node_ids],
         mode="markers+text", text=node_text, textposition="middle center",
+        textfont=dict(size=12, color="#0f172a", family="Arial Black"),
         hovertext=[f"{n} - {grafo.nodes[n].get('nome', '')}" for n in node_ids], hoverinfo="text",
         marker=dict(size=28, color=colors, line=dict(color="white", width=1)), name="Tasks",
     ))
@@ -1815,13 +1816,13 @@ def main() -> None:
                 with controllo_nomi:
                     mostra_nomi_ridondanza = st.checkbox(
                         "Show task names in redundancy graph",
-                        value=False,
+                        value=True,
                         key="ridondanza_mostra_nomi",
                     )
                 with controllo_legami:
                     mostra_legami_ridondanza = st.checkbox(
                         "Show relationship types in redundancy graph",
-                        value=False,
+                        value=True,
                         key="ridondanza_mostra_legami",
                     )
                 st.plotly_chart(
