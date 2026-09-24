@@ -918,16 +918,67 @@ def crea_grafo_ridondanza(
     }
     nodi_alternativi = {n for percorso in percorsi for n in percorso}
     sotto = grafo.subgraph(nodi_alternativi | {origine, destinazione}).copy()
+    # Layout ibrido: il livello topologico determina la posizione orizzontale,
+    # mentre spring_layout distribuisce verticalmente i nodi in base alla
+    # struttura dei percorsi. In questo modo il flusso resta leggibile da
+    # sinistra a destra, ma i rami alternativi non vengono compressi su una linea.
     try:
         generazioni = list(nx.topological_generations(sotto))
-        pos = {}
-        for x, gen in enumerate(generazioni):
-            ordinati = sorted(gen, key=str)
-            centro = (len(ordinati) - 1) / 2
-            for i, n in enumerate(ordinati):
-                pos[n] = (x, centro - i)
+        livello_nodo = {
+            nodo: livello
+            for livello, generazione in enumerate(generazioni)
+            for nodo in generazione
+        }
+
+        numero_nodi = max(sotto.number_of_nodes(), 1)
+        distanza_spring = max(0.8, min(2.2, 2.5 / math.sqrt(numero_nodi)))
+        pos_spring = nx.spring_layout(
+            sotto.to_undirected(),
+            seed=42,
+            k=distanza_spring,
+            iterations=250,
+            scale=1.0,
+        )
+
+        ampiezza_verticale = max(2.5, min(8.0, math.sqrt(numero_nodi) * 1.15))
+        pos = {
+            nodo: (
+                float(livello_nodo[nodo]),
+                float(pos_spring[nodo][1]) * ampiezza_verticale,
+            )
+            for nodo in sotto.nodes
+        }
+
+        # Se una generazione contiene più nodi ma lo spring layout li ha lasciati
+        # quasi sovrapposti, aggiunge una separazione verticale minima e stabile.
+        for generazione in generazioni:
+            nodi_generazione = sorted(generazione, key=str)
+            if len(nodi_generazione) <= 1:
+                continue
+            valori_y = [pos[n][1] for n in nodi_generazione]
+            if max(valori_y) - min(valori_y) < 0.8:
+                centro = (len(nodi_generazione) - 1) / 2
+                for indice, nodo in enumerate(nodi_generazione):
+                    pos[nodo] = (
+                        pos[nodo][0],
+                        pos[nodo][1] + (centro - indice) * 1.2,
+                    )
+
+        # Gli estremi restano centrati e fissati alle due estremità del flusso.
+        livello_origine = float(livello_nodo.get(origine, 0))
+        livello_destinazione = float(
+            livello_nodo.get(destinazione, max(livello_nodo.values(), default=1))
+        )
+        pos[origine] = (livello_origine, 0.0)
+        pos[destinazione] = (livello_destinazione, 0.0)
     except Exception:
-        pos = nx.spring_layout(sotto, seed=42)
+        pos = nx.spring_layout(
+            sotto.to_undirected(), seed=42, k=1.5, iterations=250
+        )
+        if origine in pos:
+            pos[origine] = (-1.0, 0.0)
+        if destinazione in pos:
+            pos[destinazione] = (1.0, 0.0)
     fig = go.Figure()
     gruppi = [
         ("All indirect paths", "#2563eb", "solid", list(archi_alternativi)),
@@ -975,8 +1026,9 @@ def crea_grafo_ridondanza(
         hovertext=[f"{n} - {grafo.nodes[n].get('nome', '')}" for n in node_ids], hoverinfo="text",
         marker=dict(size=28, color=colors, line=dict(color="white", width=1)), name="Tasks",
     ))
+    altezza_grafo = min(1200, max(650, 500 + sotto.number_of_nodes() * 18))
     fig.update_layout(
-        height=600, plot_bgcolor="white", margin=dict(l=10, r=10, t=45, b=60),
+        height=altezza_grafo, plot_bgcolor="white", margin=dict(l=20, r=20, t=55, b=70),
         title=f"Direct link vs. all {len(percorsi)} indirect paths",
         xaxis=dict(visible=False), yaxis=dict(visible=False),
         legend=dict(orientation="h", y=-0.08),
