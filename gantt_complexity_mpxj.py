@@ -1826,10 +1826,22 @@ def main() -> None:
                 tabella_rid_visualizzata["Relationship"]
                 .replace({"FI": "FS", "II": "SS", "IF": "SF"})
             )
-            st.dataframe(
+            # Costruisce una chiave univoca condivisa tra tabella e selectbox.
+            opzioni_rid = {
+                f"{r.Predecessor} → {r.Successor} | {r.Status}": (
+                    str(r.Predecessor), str(r.Successor)
+                )
+                for r in tabella_rid.itertuples(index=False)
+            }
+            etichette_rid = list(opzioni_rid.keys())
+
+            evento_tabella_rid = st.dataframe(
                 tabella_rid_visualizzata,
                 use_container_width=True,
                 hide_index=True,
+                key="tabella_ridondanze_selezionabile",
+                on_select="rerun",
+                selection_mode="single-row",
                 column_config={
                     "Number of alternative paths": st.column_config.NumberColumn(format="localized"),
                     "Paths removed by deleting the link": st.column_config.NumberColumn(format="localized"),
@@ -1837,6 +1849,26 @@ def main() -> None:
                     "Lag days": st.column_config.NumberColumn(format="%.2f"),
                 },
             )
+
+            # Il click su una riga aggiorna automaticamente la lista sottostante.
+            righe_selezionate = list(evento_tabella_rid.selection.rows)
+            if righe_selezionate:
+                indice_riga = int(righe_selezionate[0])
+                if 0 <= indice_riga < len(tabella_rid):
+                    riga_selezionata = tabella_rid.iloc[indice_riga]
+                    etichetta_selezionata = (
+                        f"{riga_selezionata['Predecessor']} → "
+                        f"{riga_selezionata['Successor']} | "
+                        f"{riga_selezionata['Status']}"
+                    )
+                    if etichetta_selezionata in opzioni_rid:
+                        st.session_state["ridondanza_link_selezionato"] = etichetta_selezionata
+
+            # Pulisce un'eventuale selezione non più valida dopo il filtro stato.
+            valore_corrente = st.session_state.get("ridondanza_link_selezionato")
+            if valore_corrente not in opzioni_rid:
+                st.session_state["ridondanza_link_selezionato"] = None
+
             st.download_button(
                 "Download redundant links as Excel",
                 data=crea_excel_ridondanze(tabella_rid_visualizzata),
@@ -1845,15 +1877,12 @@ def main() -> None:
                 use_container_width=True,
             )
 
-            opzioni_rid = {
-                f"{r.Predecessor} → {r.Successor} | {r.Status}": (r.Predecessor, r.Successor)
-                for r in tabella_rid.itertuples(index=False)
-            }
             selezione_rid = st.selectbox(
                 "Select a link to compare it with the indirect path",
-                list(opzioni_rid.keys()),
+                etichette_rid,
                 index=None,
-                placeholder="Select predecessor → successor",
+                placeholder="Select a row above or choose predecessor → successor",
+                key="ridondanza_link_selezionato",
             )
             if selezione_rid:
                 origine_rid, destinazione_rid = opzioni_rid[selezione_rid]
