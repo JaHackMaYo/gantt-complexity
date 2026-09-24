@@ -753,10 +753,10 @@ def crea_grafo_ridondanza(
     }
     nodi_alternativi = {n for percorso in percorsi for n in percorso}
     sotto = grafo.subgraph(nodi_alternativi | {origine, destinazione}).copy()
-    # Layout ibrido: il livello topologico determina la posizione orizzontale,
-    # mentre spring_layout distribuisce verticalmente i nodi in base alla
-    # struttura dei percorsi. In questo modo il flusso resta leggibile da
-    # sinistra a destra, ma i rami alternativi non vengono compressi su una linea.
+    # Layout deterministico a livelli e corsie.
+    # X segue il livello topologico; Y deriva dalla corsia dei percorsi che
+    # attraversano ciascun nodo. Non usa spring_layout e quindi evita calcoli
+    # iterativi o risultati instabili tra due rerun di Streamlit.
     try:
         generazioni = list(nx.topological_generations(sotto))
         livello_nodo = {
@@ -765,55 +765,67 @@ def crea_grafo_ridondanza(
             for nodo in generazione
         }
 
-        numero_nodi = max(sotto.number_of_nodes(), 1)
-        distanza_spring = max(0.8, min(2.2, 2.5 / math.sqrt(numero_nodi)))
-        pos_spring = nx.spring_layout(
-            sotto.to_undirected(),
-            seed=42,
-            k=distanza_spring,
-            iterations=250,
-            scale=1.0,
-        )
-
-        ampiezza_verticale = max(2.5, min(8.0, math.sqrt(numero_nodi) * 1.15))
-        pos = {
-            nodo: (
-                float(livello_nodo[nodo]),
-                float(pos_spring[nodo][1]) * ampiezza_verticale,
-            )
-            for nodo in sotto.nodes
+        numero_percorsi = max(len(percorsi), 1)
+        corsie = {
+            indice: (numero_percorsi - 1) / 2 - indice
+            for indice in range(numero_percorsi)
         }
+        corsie_nodo = defaultdict(list)
+        for indice, percorso in enumerate(percorsi):
+            for nodo in percorso:
+                corsie_nodo[nodo].append(corsie[indice])
 
-        # Se una generazione contiene più nodi ma lo spring layout li ha lasciati
-        # quasi sovrapposti, aggiunge una separazione verticale minima e stabile.
+        pos = {}
+        for nodo in sotto.nodes:
+            valori = corsie_nodo.get(nodo, [0.0])
+            pos[nodo] = (
+                float(livello_nodo.get(nodo, 0)),
+                float(sum(valori) / len(valori)),
+            )
+
+        # Mantiene separati i nodi che appartengono allo stesso livello e che,
+        # dopo la media delle corsie, risulterebbero sovrapposti.
+        separazione_minima = 1.15
         for generazione in generazioni:
-            nodi_generazione = sorted(generazione, key=str)
-            if len(nodi_generazione) <= 1:
+            ordinati = sorted(
+                generazione,
+                key=lambda nodo: (pos[nodo][1], str(nodo)),
+                reverse=True,
+            )
+            if len(ordinati) <= 1:
                 continue
-            valori_y = [pos[n][1] for n in nodi_generazione]
-            if max(valori_y) - min(valori_y) < 0.8:
-                centro = (len(nodi_generazione) - 1) / 2
-                for indice, nodo in enumerate(nodi_generazione):
-                    pos[nodo] = (
-                        pos[nodo][0],
-                        pos[nodo][1] + (centro - indice) * 1.2,
-                    )
+            valori_correnti = [pos[nodo][1] for nodo in ordinati]
+            centro = sum(valori_correnti) / len(valori_correnti)
+            for indice, nodo in enumerate(ordinati):
+                posizione_regolare = (
+                    (len(ordinati) - 1) / 2 - indice
+                ) * separazione_minima
+                pos[nodo] = (
+                    pos[nodo][0],
+                    centro + posizione_regolare,
+                )
 
-        # Gli estremi restano centrati e fissati alle due estremità del flusso.
-        livello_origine = float(livello_nodo.get(origine, 0))
-        livello_destinazione = float(
-            livello_nodo.get(destinazione, max(livello_nodo.values(), default=1))
+        # Origine e destinazione restano centrate alle estremità del flusso.
+        pos[origine] = (float(livello_nodo.get(origine, 0)), 0.0)
+        pos[destinazione] = (
+            float(livello_nodo.get(
+                destinazione,
+                max(livello_nodo.values(), default=1),
+            )),
+            0.0,
         )
-        pos[origine] = (livello_origine, 0.0)
-        pos[destinazione] = (livello_destinazione, 0.0)
     except Exception:
-        pos = nx.spring_layout(
-            sotto.to_undirected(), seed=42, k=1.5, iterations=250
-        )
-        if origine in pos:
-            pos[origine] = (-1.0, 0.0)
-        if destinazione in pos:
-            pos[destinazione] = (1.0, 0.0)
+        # Fallback anch'esso deterministico: disposizione per generazioni.
+        generazioni = list(nx.topological_generations(sotto))
+        pos = {}
+        for livello, generazione in enumerate(generazioni):
+            ordinati = sorted(generazione, key=str)
+            centro = (len(ordinati) - 1) / 2
+            for indice, nodo in enumerate(ordinati):
+                pos[nodo] = (
+                    float(livello),
+                    float(centro - indice),
+                )
     fig = go.Figure()
     gruppi = [
         ("All indirect paths", "#2563eb", "solid", list(archi_alternativi)),
@@ -1685,13 +1697,13 @@ def main() -> None:
             }
             etichette_rid = list(opzioni_rid.keys())
 
-            evento_tabella_rid = st.dataframe(
+            # Tabella mantenuta in sola visualizzazione. La scelta del legame
+            # avviene esclusivamente dalla selectbox sottostante, evitando rerun
+            # aggiuntivi e stato persistente generati da on_select="rerun".
+            st.dataframe(
                 tabella_rid_visualizzata,
                 use_container_width=True,
                 hide_index=True,
-                key="tabella_ridondanze_selezionabile",
-                on_select="rerun",
-                selection_mode="single-row",
                 column_config={
                     "Number of alternative paths": st.column_config.NumberColumn(format="localized"),
                     "Paths removed by deleting the link": st.column_config.NumberColumn(format="localized"),
@@ -1699,39 +1711,6 @@ def main() -> None:
                     "Lag days": st.column_config.NumberColumn(format="%.2f"),
                 },
             )
-
-            # La selezione della tabella persiste tra i rerun di Streamlit.
-            # Aggiorna quindi la selectbox solo quando cambia realmente la riga,
-            # evitando che una vecchia selezione sovrascriva ogni scelta successiva.
-            righe_selezionate = list(evento_tabella_rid.selection.rows)
-            if righe_selezionate:
-                indice_riga = int(righe_selezionate[0])
-                if 0 <= indice_riga < len(tabella_rid):
-                    riga_selezionata = tabella_rid.iloc[indice_riga]
-                    etichetta_selezionata = (
-                        f"{riga_selezionata['Predecessor']} → "
-                        f"{riga_selezionata['Successor']} | "
-                        f"{riga_selezionata['Status']}"
-                    )
-                    firma_riga_tabella = (
-                        filtro_stato,
-                        str(riga_selezionata['Predecessor']),
-                        str(riga_selezionata['Successor']),
-                        str(riga_selezionata['Status']),
-                    )
-                    firma_precedente = st.session_state.get(
-                        "ridondanza_ultima_riga_tabella"
-                    )
-                    if (
-                        firma_riga_tabella != firma_precedente
-                        and etichetta_selezionata in opzioni_rid
-                    ):
-                        st.session_state["ridondanza_link_selezionato"] = (
-                            etichetta_selezionata
-                        )
-                        st.session_state["ridondanza_ultima_riga_tabella"] = (
-                            firma_riga_tabella
-                        )
 
             # Pulisce un'eventuale selezione non più valida dopo il filtro stato.
             valore_corrente = st.session_state.get("ridondanza_link_selezionato")
@@ -1750,7 +1729,7 @@ def main() -> None:
                 "Select a link to compare it with the indirect path",
                 etichette_rid,
                 index=None,
-                placeholder="Select a row above or choose predecessor → successor",
+                placeholder="Choose predecessor → successor",
                 key="ridondanza_link_selezionato",
             )
             if selezione_rid:
@@ -1785,6 +1764,12 @@ def main() -> None:
                         mostra_tipologie_legame=mostra_legami_ridondanza,
                     ),
                     use_container_width=True,
+                    key=(
+                        f"ridondanza_grafo_{origine_rid}_{destinazione_rid}_"
+                        f"{int(mostra_nomi_ridondanza)}_"
+                        f"{int(mostra_legami_ridondanza)}"
+                    ),
+                    config={"displaylogo": False, "responsive": True},
                 )
                 tabella_percorsi = pd.DataFrame([
                     {
