@@ -590,7 +590,7 @@ def analizza_legami_ridondanti(grafo: nx.DiGraph) -> pd.DataFrame:
     """
     colonne = [
         "Predecessor", "Predecessor name", "Successor", "Successor name",
-        "Relationship", "Lag_g", "Alternative path", "Alternative steps",
+        "Relationship", "Lag_g", "Shortest alternative path", "Shortest alternative steps",
         "Number of alternative paths", "Log10 percorsi alternativi",
         "Paths removed by deleting the link", "Path reduction pct",
         "Status", "Rationale",
@@ -641,8 +641,8 @@ def analizza_legami_ridondanti(grafo: nx.DiGraph) -> pd.DataFrame:
             "Successor name": grafo.nodes[destinazione].get("nome", ""),
             "Relationship": relazione,
             "Lag_g": lag,
-            "Alternative path": " → ".join(map(str, percorso)),
-            "Alternative steps": len(percorso) - 1,
+            "Shortest alternative path": " → ".join(map(str, percorso)),
+            "Shortest alternative steps": len(percorso) - 1,
             "Number of alternative paths": alternativi,
             "Log10 percorsi alternativi": math.log10(alternativi) if alternativi > 0 else 0.0,
             "Paths removed by deleting the link": eliminati,
@@ -906,6 +906,8 @@ def riepiloga_nodi_percorsi(
 def crea_grafo_ridondanza(
     grafo: nx.DiGraph, origine: str, destinazione: str,
     percorsi: list[list[str]] | None = None,
+    mostra_nomi_attivita: bool = False,
+    mostra_tipologie_legame: bool = False,
 ) -> go.Figure:
     """Mostra il link diretto e l'unione di tutti i percorsi indiretti."""
     percorsi = percorsi if percorsi is not None else elenca_percorsi_alternativi(
@@ -942,11 +944,33 @@ def crea_grafo_ridondanza(
             x=xs, y=ys, mode="lines", name=nome, hoverinfo="skip",
             line=dict(color=colore, width=4, dash=dash),
         ))
+    if mostra_tipologie_legame:
+        edge_x, edge_y, edge_text = [], [], []
+        for u, v in list(archi_alternativi) + [(origine, destinazione)]:
+            if u not in pos or v not in pos:
+                continue
+            dati = grafo.edges[u, v]
+            relazione = str(dati.get("relazione", "FI")).upper()
+            relazione = {"FI": "FS", "II": "SS", "IF": "SF"}.get(relazione, relazione)
+            lag = float(dati.get("lag", 0) or 0)
+            etichetta = relazione + (f" {formatta_lag(lag)}" if abs(lag) >= 1e-9 else "")
+            edge_x.append((pos[u][0] + pos[v][0]) / 2)
+            edge_y.append((pos[u][1] + pos[v][1]) / 2)
+            edge_text.append(etichetta)
+        fig.add_trace(go.Scatter(
+            x=edge_x, y=edge_y, mode="text", text=edge_text,
+            textfont=dict(size=11, color="#111827"),
+            hoverinfo="skip", showlegend=False, name="Relationship types",
+        ))
     node_ids = list(sotto.nodes)
     colors = ["#dc2626" if n in {origine, destinazione} else "#2563eb" for n in node_ids]
+    node_text = [
+        f"{n}<br>{grafo.nodes[n].get('nome', '')}" if mostra_nomi_attivita else str(n)
+        for n in node_ids
+    ]
     fig.add_trace(go.Scatter(
         x=[pos[n][0] for n in node_ids], y=[pos[n][1] for n in node_ids],
-        mode="markers+text", text=[str(n) for n in node_ids], textposition="middle center",
+        mode="markers+text", text=node_text, textposition="middle center",
         hovertext=[f"{n} - {grafo.nodes[n].get('nome', '')}" for n in node_ids], hoverinfo="text",
         marker=dict(size=28, color=colors, line=dict(color="white", width=1)), name="Tasks",
     ))
@@ -1719,9 +1743,9 @@ def main() -> None:
                 "Successor name",
                 "Relationship",
                 "Lag_g",
-                "Alternative path",
+                "Shortest alternative path",
                 "Paths removed by deleting the link",
-                "Alternative steps",
+                "Shortest alternative steps",
                 "Number of alternative paths",
                 "Path reduction pct",
                 "Status",
@@ -1734,9 +1758,9 @@ def main() -> None:
                 "Successor name": "Successor name",
                 "Relationship": "Relationship",
                 "Lag_g": "Lag days",
-                "Alternative path": "Alternative path",
+                "Shortest alternative path": "Shortest alternative path",
                 "Paths removed by deleting the link": "Paths removed by deleting the link",
-                "Alternative steps": "Alternative steps",
+                "Shortest alternative steps": "Shortest alternative steps",
                 "Number of alternative paths": "Number of alternative paths",
                 "Path reduction pct": "Path reduction pct",
                 "Status": "Status",
@@ -1787,16 +1811,34 @@ def main() -> None:
                     f"Direct link {origine_rid} → {destinazione_rid}: "
                     f"{len(percorsi_alternativi):,} indirect alternative path(s).".replace(",", ".")
                 )
+                controllo_nomi, controllo_legami = st.columns(2)
+                with controllo_nomi:
+                    mostra_nomi_ridondanza = st.checkbox(
+                        "Show task names in redundancy graph",
+                        value=False,
+                        key="ridondanza_mostra_nomi",
+                    )
+                with controllo_legami:
+                    mostra_legami_ridondanza = st.checkbox(
+                        "Show relationship types in redundancy graph",
+                        value=False,
+                        key="ridondanza_mostra_legami",
+                    )
                 st.plotly_chart(
                     crea_grafo_ridondanza(
-                        grafo, origine_rid, destinazione_rid, percorsi_alternativi
+                        grafo,
+                        origine_rid,
+                        destinazione_rid,
+                        percorsi_alternativi,
+                        mostra_nomi_attivita=mostra_nomi_ridondanza,
+                        mostra_tipologie_legame=mostra_legami_ridondanza,
                     ),
                     use_container_width=True,
                 )
                 tabella_percorsi = pd.DataFrame([
                     {
                         "#": indice,
-                        "Alternative path": " → ".join(map(str, percorso)),
+                        "Shortest alternative path": " → ".join(map(str, percorso)),
                         "Steps": len(percorso) - 1,
                     }
                     for indice, percorso in enumerate(percorsi_alternativi, start=1)
