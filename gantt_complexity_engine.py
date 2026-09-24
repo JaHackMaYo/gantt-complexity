@@ -1,3 +1,5 @@
+# python -m streamlit run gantt_complexity_engine.py
+
 from __future__ import annotations
 
 import io
@@ -1698,7 +1700,9 @@ def main() -> None:
                 },
             )
 
-            # Il click su una riga aggiorna automaticamente la lista sottostante.
+            # La selezione della tabella persiste tra i rerun di Streamlit.
+            # Aggiorna quindi la selectbox solo quando cambia realmente la riga,
+            # evitando che una vecchia selezione sovrascriva ogni scelta successiva.
             righe_selezionate = list(evento_tabella_rid.selection.rows)
             if righe_selezionate:
                 indice_riga = int(righe_selezionate[0])
@@ -1709,8 +1713,25 @@ def main() -> None:
                         f"{riga_selezionata['Successor']} | "
                         f"{riga_selezionata['Status']}"
                     )
-                    if etichetta_selezionata in opzioni_rid:
-                        st.session_state["ridondanza_link_selezionato"] = etichetta_selezionata
+                    firma_riga_tabella = (
+                        filtro_stato,
+                        str(riga_selezionata['Predecessor']),
+                        str(riga_selezionata['Successor']),
+                        str(riga_selezionata['Status']),
+                    )
+                    firma_precedente = st.session_state.get(
+                        "ridondanza_ultima_riga_tabella"
+                    )
+                    if (
+                        firma_riga_tabella != firma_precedente
+                        and etichetta_selezionata in opzioni_rid
+                    ):
+                        st.session_state["ridondanza_link_selezionato"] = (
+                            etichetta_selezionata
+                        )
+                        st.session_state["ridondanza_ultima_riga_tabella"] = (
+                            firma_riga_tabella
+                        )
 
             # Pulisce un'eventuale selezione non più valida dopo il filtro stato.
             valore_corrente = st.session_state.get("ridondanza_link_selezionato")
