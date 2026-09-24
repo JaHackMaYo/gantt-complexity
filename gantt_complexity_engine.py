@@ -39,6 +39,7 @@ import streamlit as st
 
 COL_MACRO = "PrismaMacroActivity"
 COL_ID = "ID"
+COL_UNIQUE_ID = "Unique ID"
 COL_PREDECESSORI = "Predecessori"
 COL_NOME = "Nome"
 COL_DURATA = "Durata"
@@ -146,7 +147,12 @@ def carica_schedule(contenuto: bytes, foglio: str) -> pd.DataFrame:
         raise ValueError("Missing columns: " + ", ".join(sorted(mancanti)))
 
     df = df.copy()
+    if COL_UNIQUE_ID not in df.columns:
+        df[COL_UNIQUE_ID] = ""
     df[COL_ID] = df[COL_ID].apply(normalizza_id)
+    df[COL_UNIQUE_ID] = df[COL_UNIQUE_ID].apply(
+        lambda value: normalizza_id(value) or ""
+    )
     df = df[df[COL_ID].notna()].copy()
     df[COL_NOME] = df[COL_NOME].fillna("").astype(str).str.strip()
     df[COL_MACRO] = (
@@ -202,13 +208,13 @@ def crea_excel_schedule_estratto(df: pd.DataFrame) -> bytes:
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         for col, width in {
-            "A": 32, "B": 10, "C": 45, "D": 60,
-            "E": 18, "F": 20, "G": 20,
+            "A": 32, "B": 10, "C": 16, "D": 45, "E": 60,
+            "F": 18, "G": 20, "H": 20,
         }.items():
             ws.column_dimensions[col].width = width
-        for cell in ws["F"][1:]:
-            cell.number_format = "dd/mm/yyyy hh:mm"
         for cell in ws["G"][1:]:
+            cell.number_format = "dd/mm/yyyy hh:mm"
+        for cell in ws["H"][1:]:
             cell.number_format = "dd/mm/yyyy hh:mm"
     output.seek(0)
     return output.getvalue()
@@ -226,6 +232,7 @@ def costruisci_grafo(
     for _, row in df.iterrows():
         grafo.add_node(
             row[COL_ID],
+            unique_id=row.get(COL_UNIQUE_ID, ""),
             nome=row[COL_NOME],
             macro=row[COL_MACRO],
             durata=row[COL_DURATA],
@@ -328,6 +335,7 @@ def analizza_da_dataframe(
         righe.append(
             {
                 "ID": nodo,
+                "Unique ID": attributi.get("unique_id", ""),
                 "Nome": attributi.get("nome", ""),
                 "PrismaMacroActivity": attributi.get("macro", ""),
                 "Inizio": attributi.get("inizio"),
@@ -419,7 +427,8 @@ def analizza_legami_ridondanti(grafo: nx.DiGraph) -> pd.DataFrame:
     essere cancellato, soprattutto in presenza di lag o relazioni diverse da FI.
     """
     colonne = [
-        "Predecessor", "Predecessor name", "Successor", "Successor name",
+        "Predecessor", "Predecessor Unique ID", "Predecessor name",
+        "Successor", "Successor Unique ID", "Successor name",
         "Relationship", "Lag_g", "Shortest alternative path", "Shortest alternative steps",
         "Number of alternative paths", "Log10 percorsi alternativi",
         "Paths removed by deleting the link", "Path reduction pct",
@@ -470,8 +479,10 @@ def analizza_legami_ridondanti(grafo: nx.DiGraph) -> pd.DataFrame:
 
         righe.append({
             "Predecessor": origine,
+            "Predecessor Unique ID": grafo.nodes[origine].get("unique_id", ""),
             "Predecessor name": grafo.nodes[origine].get("nome", ""),
             "Successor": destinazione,
+            "Successor Unique ID": grafo.nodes[destinazione].get("unique_id", ""),
             "Successor name": grafo.nodes[destinazione].get("nome", ""),
             "Relationship": relazione,
             "Lag_g": lag,
@@ -517,6 +528,7 @@ def analizza_grafo_esistente(grafo: nx.DiGraph) -> pd.DataFrame:
         )
         righe.append({
             "ID": nodo,
+            "Unique ID": attributi.get("unique_id", ""),
             "Nome": attributi.get("nome", ""),
             "PrismaMacroActivity": attributi.get("macro", ""),
             "Inizio": attributi.get("inizio"),
@@ -568,8 +580,10 @@ def crea_scenario_senza_ridondanze(
             nuovo.remove_edge(origine, destinazione)
             rimossi.append({
                 "Predecessor": origine,
+                "Predecessor Unique ID": nuovo.nodes[origine].get("unique_id", ""),
                 "Predecessor name": nuovo.nodes[origine].get("nome", ""),
                 "Successor": destinazione,
+                "Successor Unique ID": nuovo.nodes[destinazione].get("unique_id", ""),
                 "Successor name": nuovo.nodes[destinazione].get("nome", ""),
                 "Relationship": dati.get("relazione", "FI"),
                 "Lag days": dati.get("lag", 0),
@@ -603,7 +617,7 @@ def crea_dataframe_gantt_ridotto(
 ) -> pd.DataFrame:
     """Crea le sette colonne ricaricabili rimuovendo solo i link selezionati."""
     risultato = df_perimetro[
-        [COL_MACRO, COL_ID, COL_PREDECESSORI, COL_NOME, COL_DURATA, COL_INIZIO, COL_FINE]
+        [COL_MACRO, COL_ID, COL_UNIQUE_ID, COL_PREDECESSORI, COL_NOME, COL_DURATA, COL_INIZIO, COL_FINE]
     ].copy()
     risultato[COL_ID] = risultato[COL_ID].apply(normalizza_id)
     archi_da_rimuovere = set()
@@ -647,11 +661,11 @@ def crea_excel_gantt_ridotto_ricaricabile(
         ws = writer.sheets["data"]
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
-        for col, width in {"A": 32, "B": 10, "C": 48, "D": 60, "E": 18, "F": 20, "G": 20}.items():
+        for col, width in {"A": 32, "B": 10, "C": 16, "D": 48, "E": 60, "F": 18, "G": 20, "H": 20}.items():
             ws.column_dimensions[col].width = width
-        for cell in ws["F"][1:]:
-            cell.number_format = "dd/mm/yyyy hh:mm"
         for cell in ws["G"][1:]:
+            cell.number_format = "dd/mm/yyyy hh:mm"
+        for cell in ws["H"][1:]:
             cell.number_format = "dd/mm/yyyy hh:mm"
         for nome in ["Removed links", "Comparison"]:
             foglio = writer.sheets[nome]
@@ -742,6 +756,7 @@ def riepiloga_nodi_percorsi(
     for nodo, conteggio in conteggi.items():
         righe.append({
             "Task ID": nodo,
+            "Task Unique ID": grafo.nodes[nodo].get("unique_id", ""),
             "Task name": grafo.nodes[nodo].get("nome", ""),
             "Paths containing task": conteggio,
             "Presence pct": conteggio / totale * 100 if totale else 0.0,
@@ -749,7 +764,7 @@ def riepiloga_nodi_percorsi(
     return pd.DataFrame(righe).sort_values(
         ["Paths containing task", "Task ID"], ascending=[False, True]
     ) if righe else pd.DataFrame(columns=[
-        "Task ID", "Task name", "Paths containing task", "Presence pct"
+        "Task ID", "Task Unique ID", "Task name", "Paths containing task", "Presence pct"
     ])
 
 
@@ -901,7 +916,8 @@ def crea_grafo_ridondanza(
     node_ids = list(sotto.nodes)
     colors = ["#dc2626" if n in {origine, destinazione} else "#2563eb" for n in node_ids]
     hover_nodi = [
-        f"{n} - {grafo.nodes[n].get('nome', '')}" for n in node_ids
+        f"{n} | UID {grafo.nodes[n].get('unique_id', '')} - {grafo.nodes[n].get('nome', '')}"
+        for n in node_ids
     ]
     fig.add_trace(go.Scatter(
         x=[pos[n][0] for n in node_ids],
@@ -1080,6 +1096,7 @@ def crea_grafo_interattivo(
         riga = ranking_map.loc[nodo]
         hover.append(
             f"<b>{nodo} - {riga['Nome']}</b><br>"
+            f"Unique ID: {riga['Unique ID']}<br>"
             f"Macro: {riga['PrismaMacroActivity']}<br>"
             f"Predecessors: {riga['Fan_in']}<br>"
             f"Successors: {riga['Fan_out']}<br>"
@@ -1342,15 +1359,19 @@ def main() -> None:
             [COL_FINE, COL_NOME, COL_ID],
             ascending=[False, True, True],
             na_position="last",
-        )[[COL_ID, COL_NOME, COL_FINE]]
+        )[[COL_ID, COL_UNIQUE_ID, COL_NOME, COL_FINE]]
         etichette_finali = {
             (
-                f"{r.ID} - {r.Nome} | "
-                f"Finish: {pd.Timestamp(r.Fine):%d/%m/%Y}"
-                if pd.notna(r.Fine)
-                else f"{r.ID} - {r.Nome} | Finish: not available"
-            ): r.ID
-            for r in opzioni_finali.itertuples(index=False)
+                f"{task_id} - {nome} | UID: {unique_id or 'not available'} | "
+                f"Finish: {pd.Timestamp(fine):%d/%m/%Y}"
+                if pd.notna(fine)
+                else (
+                    f"{task_id} - {nome} | UID: {unique_id or 'not available'} | "
+                    "Finish: not available"
+                )
+            ): task_id
+            for task_id, unique_id, nome, fine
+            in opzioni_finali.itertuples(index=False, name=None)
         }
         etichetta_finale = st.sidebar.selectbox(
             "Final task",
@@ -1626,6 +1647,7 @@ def main() -> None:
         )
         colonne = [
             "ID",
+            "Unique ID",
             "Nome",
             "Inizio",
             "Fine",
@@ -1707,8 +1729,10 @@ def main() -> None:
             tabella_rid = ridondanze if filtro_stato == "All" else ridondanze[ridondanze["Status"] == filtro_stato]
             colonne_ridondanze = [
                 "Predecessor",
+                "Predecessor Unique ID",
                 "Predecessor name",
                 "Successor",
+                "Successor Unique ID",
                 "Successor name",
                 "Relationship",
                 "Lag_g",
@@ -1722,8 +1746,10 @@ def main() -> None:
             ]
             nomi_ridondanze = {
                 "Predecessor": "Predecessor",
+                "Predecessor Unique ID": "Predecessor Unique ID",
                 "Predecessor name": "Predecessor name",
                 "Successor": "Successor",
+                "Successor Unique ID": "Successor Unique ID",
                 "Successor name": "Successor name",
                 "Relationship": "Relationship",
                 "Lag_g": "Lag days",
@@ -1939,7 +1965,7 @@ def main() -> None:
                 help="The data worksheet can be uploaded again into the app as an Excel schedule.",
             )
             st.caption(
-                "The 'data' worksheet retains the PrismaMacroActivity, ID, Predecessori, Nome, "
+                "The 'data' worksheet retains the PrismaMacroActivity, ID, Unique ID, Predecessori, Nome, "
                 "Durata, Inizio, and Fine column names for reload compatibility. Predecessors are "
                 f"removed according to the selected option: {modalita_riduzione}."
             )

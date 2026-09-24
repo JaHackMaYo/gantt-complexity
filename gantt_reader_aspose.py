@@ -8,6 +8,7 @@ import pandas as pd
 
 COL_MACRO = "PrismaMacroActivity"
 COL_ID = "ID"
+COL_UNIQUE_ID = "Unique ID"
 COL_PREDECESSORI = "Predecessori"
 COL_NOME = "Nome"
 COL_DURATA = "Durata"
@@ -202,7 +203,9 @@ def costruisci_predecessori(project) -> tuple[dict[int, list[str]], list[dict]]:
         predecessori[succ_id].append(testo)
         dettaglio.append({
             "Predecessore": str(pred_id),
+            "Predecessore Unique ID": str(getattr(pred, "uid", "") or ""),
             "Successore": str(succ_id),
+            "Successore Unique ID": str(getattr(succ, "uid", "") or ""),
             "Relazione": relazione,
             "Lag giorni": lag_giorni,
             "Testo predecessore": testo,
@@ -242,6 +245,7 @@ def carica_schedule_mpp(contenuto: bytes, nome_file: str) -> pd.DataFrame:
             righe.append({
                 COL_MACRO: leggi_prisma_macro_activity(project, task),
                 COL_ID: str(task_id),
+                COL_UNIQUE_ID: str(getattr(task, "uid", "") or ""),
                 COL_PREDECESSORI: ";".join(predecessori.get(task_id, [])),
                 COL_NOME: str(task.name or "").strip(),
                 COL_DURATA: str(task.duration or ""),
@@ -250,7 +254,7 @@ def carica_schedule_mpp(contenuto: bytes, nome_file: str) -> pd.DataFrame:
             })
 
         df = pd.DataFrame(righe, columns=[
-            COL_MACRO, COL_ID, COL_PREDECESSORI, COL_NOME,
+            COL_MACRO, COL_ID, COL_UNIQUE_ID, COL_PREDECESSORI, COL_NOME,
             COL_DURATA, COL_INIZIO, COL_FINE,
         ])
         df[COL_MACRO] = df[COL_MACRO].fillna("").astype(str).str.strip()
