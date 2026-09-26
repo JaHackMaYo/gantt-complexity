@@ -3,5 +3,6 @@ pandas
 openpyxl
 networkx
 plotly
-mpxj
-JPype1
+aspose-tasks
+reportlab
+kaleido

@@ -952,6 +952,433 @@ def crea_grafo_ridondanza(
     )
     return fig
 
+def crea_pdf_relazione_ridondanze(
+    ridondanze: pd.DataFrame,
+    grafo: nx.DiGraph,
+    progress_callback=None,
+) -> bytes:
+    """Genera due pagine PDF 16:9 per ogni ridondanza.
+
+    La prima pagina mostra il percorso alternativo piu breve; la seconda mostra
+    l'unione di tutti i percorsi alternativi, senza enumerarli singolarmente.
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import landscape
+        from reportlab.pdfgen import canvas
+    except ImportError as exc:
+        raise RuntimeError(
+            "PDF export requires ReportLab. Install it with: pip install reportlab"
+        ) from exc
+    if ridondanze.empty:
+        raise ValueError("There are no redundancies to include in the PDF report.")
+
+    # Formato presentazione 16:9: 13.333 x 7.5 pollici, orizzontale.
+    page_size = landscape((7.5 * 72, 13.333 * 72))
+    page_width, page_height = page_size
+    output = io.BytesIO()
+    pdf = canvas.Canvas(output, pagesize=page_size)
+    pdf.setTitle("Potentially redundant links report")
+    # Font PDF standard: nessun embedding/subsetting TTF durante la generazione.
+    font_regular = "Helvetica"
+    font_bold = "Helvetica-Bold"
+
+    def testo(value) -> str:
+        if pd.isna(value):
+            return ""
+        if isinstance(value, float):
+            return f"{value:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return str(value)
+
+    def formatta_intero_migliaia(value) -> str:
+        try:
+            return f"{int(value):,}".replace(",", ".")
+        except (TypeError, ValueError):
+            return testo(value)
+
+    def tronca(value, max_chars: int) -> str:
+        value = testo(value)
+        return value if len(value) <= max_chars else value[: max_chars - 3] + "..."
+
+    def disegna_intestazione_e_caratteristiche(
+        row: pd.Series,
+        origine: str,
+        destinazione: str,
+        numero_pagina: int,
+        totale_pagine: int,
+        sottotitolo: str,
+    ) -> tuple[float, float, float, float]:
+        pdf.setFillColor(colors.HexColor("#0f172a"))
+        pdf.rect(0, page_height - 58, page_width, 58, fill=1, stroke=0)
+        pdf.setFillColor(colors.white)
+        pdf.setFont(font_bold, 19)
+        pdf.drawString(28, page_height - 32, f"Redundant link {origine} - {destinazione}")
+        pdf.setFont(font_regular, 8.5)
+        pdf.drawString(28, page_height - 47, sottotitolo)
+        pdf.drawRightString(
+            page_width - 28,
+            page_height - 35,
+            f"{numero_pagina} / {totale_pagine}",
+        )
+
+        left = 28
+        top = page_height - 78
+        box_width = page_width - 56
+        box_height = 150
+        pdf.setFillColor(colors.HexColor("#f8fafc"))
+        pdf.setStrokeColor(colors.HexColor("#cbd5e1"))
+        pdf.roundRect(left, top - box_height, box_width, box_height, 8, fill=1, stroke=1)
+        campi = [
+            ("Predecessor", origine),
+            ("Predecessor Unique ID", row.get("Predecessor Unique ID", "")),
+            ("Predecessor name", row.get("Predecessor name", "")),
+            ("Successor", destinazione),
+            ("Successor Unique ID", row.get("Successor Unique ID", "")),
+            ("Successor name", row.get("Successor name", "")),
+            (
+                "Relationship",
+                {"FI": "FS", "II": "SS", "IF": "SF"}.get(
+                    str(row.get("Relationship", "")),
+                    str(row.get("Relationship", "")),
+                ),
+            ),
+            ("Lag days", row.get("Lag_g", "")),
+            ("Shortest alternative steps", row.get("Shortest alternative steps", "")),
+            ("Number of alternative paths", row.get("Number of alternative paths", "")),
+            (
+                "Paths removed by deleting the link",
+                formatta_intero_migliaia(row.get("Paths removed by deleting the link", "")),
+            ),
+            ("Path reduction pct", f"{float(row.get('Path reduction pct', 0) or 0):.3f}%"),
+            ("Status", row.get("Status", "")),
+            ("Rationale", row.get("Rationale", "")),
+            (
+                "Shortest alternative path",
+                str(row.get("Shortest alternative path", "")).replace("→", "->"),
+            ),
+        ]
+        col_width = box_width / 3
+        row_height = 27
+        for idx, (label, value) in enumerate(campi):
+            col = idx % 3
+            r = idx // 3
+            x = left + 12 + col * col_width
+            y = top - 18 - r * row_height
+            pdf.setFillColor(colors.HexColor("#475569"))
+            pdf.setFont(font_bold, 7.2)
+            pdf.drawString(x, y, label)
+            pdf.setFillColor(colors.HexColor("#0f172a"))
+            pdf.setFont(font_regular, 8.4)
+            pdf.drawString(x, y - 11, tronca(value, 48 if col < 2 else 62))
+        return left, top, box_width, box_height
+
+    def etichetta_relazione(u: str, v: str) -> str:
+        dati_arco = grafo.edges[u, v]
+        relazione = str(dati_arco.get("relazione", "FI")).upper()
+        relazione = {"FI": "FS", "II": "SS", "IF": "SF"}.get(
+            relazione, relazione
+        )
+        lag = float(dati_arco.get("lag", 0) or 0)
+        return relazione + (f" {formatta_lag(lag)}" if abs(lag) >= 1e-9 else "")
+
+    def disegna_link_diretto(
+        origine: str,
+        destinazione: str,
+        posizioni: dict[str, tuple[float, float]],
+        posizione_etichetta_y: float,
+    ) -> None:
+        x0, y0 = posizioni[origine]
+        x1, y1 = posizioni[destinazione]
+        pdf.setStrokeColor(colors.HexColor("#dc2626"))
+        pdf.setLineWidth(3)
+        pdf.setDash(8, 5)
+        pdf.line(x0, y0, x1, y1)
+        pdf.setDash()
+        pdf.setFillColor(colors.HexColor("#dc2626"))
+        pdf.setFont(font_bold, 7)
+        pdf.drawCentredString(
+            (x0 + x1) / 2,
+            posizione_etichetta_y,
+            etichetta_relazione(origine, destinazione),
+        )
+
+    def disegna_nodi(
+        nodi: list[str],
+        posizioni: dict[str, tuple[float, float]],
+        origine: str,
+        destinazione: str,
+        nome_max_chars: int,
+        font_nome: float,
+    ) -> None:
+        for nodo in nodi:
+            x, y = posizioni[nodo]
+            estremo = nodo in {origine, destinazione}
+            pdf.setFillColor(colors.HexColor("#dc2626" if estremo else "#2563eb"))
+            pdf.setStrokeColor(colors.white)
+            pdf.circle(x, y, 9 if len(nodi) > 18 else 10, fill=1, stroke=1)
+            pdf.setFillColor(colors.HexColor("#0f172a"))
+            pdf.setFont(font_bold, 6.8 if len(nodi) > 18 else 7.2)
+            pdf.drawCentredString(x, y + 13, tronca(nodo, 12))
+            pdf.setFont(font_regular, font_nome)
+            pdf.drawCentredString(
+                x,
+                y - 19,
+                tronca(grafo.nodes[nodo].get("nome", ""), nome_max_chars),
+            )
+
+    def disegna_percorso_breve(
+        percorso: list[str],
+        origine: str,
+        destinazione: str,
+        left: float,
+        top: float,
+        box_width: float,
+        box_height: float,
+    ) -> None:
+        graph_left = left + 18
+        graph_right = left + box_width - 18
+        graph_bottom = 64
+        graph_top = top - box_height - 30
+        graph_middle = (graph_bottom + graph_top) / 2
+        numero_nodi = max(len(percorso), 2)
+        passo_x = (graph_right - graph_left) / max(numero_nodi - 1, 1)
+        posizioni = {}
+        for indice, nodo in enumerate(percorso):
+            x = graph_left + indice * passo_x
+            if indice in {0, numero_nodi - 1}:
+                y = graph_middle
+            else:
+                # Shift sempre visibile, anche con un solo nodo intermedio.
+                ampiezza = min(62.0, max(32.0, (graph_top - graph_bottom) * 0.32))
+                verso = 1.0 if (indice - 1) % 2 == 0 else -1.0
+                modulazione = 1.0 + 0.12 * ((indice - 1) % 3)
+                y = graph_middle + verso * ampiezza * modulazione
+                y = min(graph_top - 24, max(graph_bottom + 24, y))
+            posizioni[nodo] = (x, y)
+
+        pdf.setFillColor(colors.HexColor("#0f172a"))
+        pdf.setFont(font_bold, 11)
+        pdf.drawString(graph_left, graph_top + 10, "Direct link vs. shortest indirect path")
+        pdf.setStrokeColor(colors.HexColor("#2563eb"))
+        pdf.setLineWidth(3)
+        pdf.setDash()
+        for u, v in zip(percorso[:-1], percorso[1:]):
+            x0, y0 = posizioni[u]
+            x1, y1 = posizioni[v]
+            pdf.line(x0, y0, x1, y1)
+            pdf.setFillColor(colors.HexColor("#92400e"))
+            pdf.setFont(font_bold, 7)
+            pdf.drawCentredString(
+                (x0 + x1) / 2,
+                (y0 + y1) / 2 + 6,
+                etichetta_relazione(u, v),
+            )
+        disegna_link_diretto(
+            origine,
+            destinazione,
+            posizioni,
+            graph_middle - 13,
+        )
+        disegna_nodi(
+            percorso,
+            posizioni,
+            origine,
+            destinazione,
+            nome_max_chars=28,
+            font_nome=6.5,
+        )
+
+    def sottografo_tutti_percorsi(
+        origine: str,
+        destinazione: str,
+    ) -> nx.DiGraph:
+        vista = _vista_senza_arco(grafo, origine, destinazione)
+        raggiungibili = nx.descendants(vista, origine) | {origine}
+        antenati = nx.ancestors(vista, destinazione) | {destinazione}
+        nodi_utili = raggiungibili & antenati
+        return vista.subgraph(nodi_utili).copy()
+
+    def disegna_tutti_percorsi(
+        sotto: nx.DiGraph,
+        origine: str,
+        destinazione: str,
+        left: float,
+        top: float,
+        box_width: float,
+        box_height: float,
+        numero_percorsi: int,
+    ) -> None:
+        graph_left = left + 18
+        graph_right = left + box_width - 18
+        graph_bottom = 64
+        graph_top = top - box_height - 30
+        graph_height = graph_top - graph_bottom
+
+        ordine = list(nx.topological_sort(sotto))
+        livelli = {origine: 0}
+        for nodo in ordine:
+            if nodo == origine:
+                continue
+            predecessori = list(sotto.predecessors(nodo))
+            livelli[nodo] = 1 + max((livelli.get(p, 0) for p in predecessori), default=0)
+        livello_massimo = max(livelli.values(), default=1)
+        nodi_per_livello = defaultdict(list)
+        for nodo in ordine:
+            nodi_per_livello[livelli.get(nodo, 0)].append(nodo)
+
+        posizioni = {}
+        for livello, nodi_livello in nodi_per_livello.items():
+            x = graph_left + (graph_right - graph_left) * livello / max(livello_massimo, 1)
+            ordinati = sorted(nodi_livello, key=str)
+            for indice, nodo in enumerate(ordinati, start=1):
+                y = graph_bottom + graph_height * indice / (len(ordinati) + 1)
+                posizioni[nodo] = (x, y)
+        graph_middle = (graph_bottom + graph_top) / 2
+        posizioni[origine] = (graph_left, graph_middle)
+        posizioni[destinazione] = (graph_right, graph_middle)
+
+        # Shift deterministico anche per livelli contenenti un solo nodo.
+        intermedi = [nodo for nodo in ordine if nodo not in {origine, destinazione}]
+        ampiezza_shift = min(48.0, max(24.0, graph_height * 0.18))
+        for indice, nodo in enumerate(intermedi):
+            x, y = posizioni[nodo]
+            livello = livelli.get(nodo, 0)
+            verso = 1.0 if (livello + indice) % 2 == 0 else -1.0
+            modulazione = 1.0 + 0.15 * (livello % 3)
+            y = y + verso * ampiezza_shift * modulazione
+            y = min(graph_top - 24, max(graph_bottom + 24, y))
+            posizioni[nodo] = (x, y)
+
+        pdf.setFillColor(colors.HexColor("#0f172a"))
+        pdf.setFont(font_bold, 11)
+        pdf.drawString(
+            graph_left,
+            graph_top + 10,
+            f"Direct link vs. all {formatta_intero_migliaia(numero_percorsi)} indirect paths",
+        )
+        pdf.setStrokeColor(colors.HexColor("#2563eb"))
+        pdf.setLineWidth(1.6 if sotto.number_of_edges() > 30 else 2.2)
+        pdf.setDash()
+        for u, v in sotto.edges():
+            x0, y0 = posizioni[u]
+            x1, y1 = posizioni[v]
+            pdf.line(x0, y0, x1, y1)
+            if sotto.number_of_edges() <= 45:
+                pdf.setFillColor(colors.HexColor("#92400e"))
+                pdf.setFont(font_bold, 5.8)
+                pdf.drawCentredString(
+                    (x0 + x1) / 2,
+                    (y0 + y1) / 2 + 4,
+                    etichetta_relazione(u, v),
+                )
+        disegna_link_diretto(
+            origine,
+            destinazione,
+            posizioni,
+            graph_bottom + 5,
+        )
+        nodi = list(sotto.nodes())
+        disegna_nodi(
+            nodi,
+            posizioni,
+            origine,
+            destinazione,
+            nome_max_chars=18 if len(nodi) > 18 else 24,
+            font_nome=5.2 if len(nodi) > 18 else 6.0,
+        )
+
+    totale_pagine = sum(
+        1 if int(row.get("Number of alternative paths", 0) or 0) <= 1 else 2
+        for _, row in ridondanze.iterrows()
+    )
+    pagina_corrente = 0
+    for _, row in ridondanze.iterrows():
+        origine = str(row["Predecessor"])
+        destinazione = str(row["Successor"])
+        vista = _vista_senza_arco(grafo, origine, destinazione)
+        try:
+            percorso_breve = nx.shortest_path(vista, origine, destinazione)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            percorso_breve = [origine, destinazione]
+        tutti_percorsi = sottografo_tutti_percorsi(origine, destinazione)
+        numero_percorsi = int(row.get("Number of alternative paths", 0) or 0)
+
+        pagina_corrente += 1
+        left, top, box_width, box_height = disegna_intestazione_e_caratteristiche(
+            row,
+            origine,
+            destinazione,
+            pagina_corrente,
+            totale_pagine,
+            "Shortest alternative path",
+        )
+        disegna_percorso_breve(
+            percorso_breve,
+            origine,
+            destinazione,
+            left,
+            top,
+            box_width,
+            box_height,
+        )
+        pdf.setFillColor(colors.HexColor("#64748b"))
+        pdf.setFont(font_regular, 7.5)
+        pdf.drawString(
+            left,
+            20,
+            "Red: suspicious direct link. Blue: shortest indirect alternative path.",
+        )
+        pdf.showPage()
+        if progress_callback is not None:
+            progress_callback(
+                pagina_corrente,
+                totale_pagine,
+                origine,
+                destinazione,
+            )
+
+        if numero_percorsi <= 1:
+            continue
+
+        pagina_corrente += 1
+        left, top, box_width, box_height = disegna_intestazione_e_caratteristiche(
+            row,
+            origine,
+            destinazione,
+            pagina_corrente,
+            totale_pagine,
+            "All alternative paths",
+        )
+        disegna_tutti_percorsi(
+            tutti_percorsi,
+            origine,
+            destinazione,
+            left,
+            top,
+            box_width,
+            box_height,
+            numero_percorsi,
+        )
+        pdf.setFillColor(colors.HexColor("#64748b"))
+        pdf.setFont(font_regular, 7.5)
+        pdf.drawString(
+            left,
+            20,
+            "Red: suspicious direct link. Blue: union of all indirect alternative paths.",
+        )
+        pdf.showPage()
+        if progress_callback is not None:
+            progress_callback(
+                pagina_corrente,
+                totale_pagine,
+                origine,
+                destinazione,
+            )
+
+    pdf.save()
+    output.seek(0)
+    return output.getvalue()
+
 def crea_excel_ridondanze(ridondanze: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -1832,6 +2259,75 @@ def main() -> None:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
+            # Il PDF non viene creato durante i normali rerun di Streamlit.
+            # L'utente lo prepara esplicitamente; al termine compare il download.
+            firma_pdf_ridondanze = (
+                firma_file,
+                modalita_riduzione,
+                tuple(
+                    (str(r.Predecessor), str(r.Successor), str(r.Status))
+                    for r in ridondanze.itertuples(index=False)
+                ),
+            )
+            if st.session_state.get("firma_pdf_ridondanze") != firma_pdf_ridondanze:
+                st.session_state.pop("pdf_ridondanze_bytes", None)
+                st.session_state["firma_pdf_ridondanze"] = firma_pdf_ridondanze
+
+            if st.button(
+                "Prepare PDF report for download",
+                type="primary",
+                use_container_width=True,
+                help=(
+                    "Creates the report only now. One page is generated when there "
+                    "is one alternative path; otherwise two pages are generated."
+                ),
+                key="prepara_pdf_ridondanze",
+            ):
+                barra_pdf = st.progress(0.0, text="Starting PDF report generation...")
+
+                def aggiorna_progresso_pdf(
+                    pagina: int,
+                    totale: int,
+                    origine: str,
+                    destinazione: str,
+                ) -> None:
+                    avanzamento = pagina / totale if totale else 1.0
+                    barra_pdf.progress(
+                        avanzamento,
+                        text=(
+                            f"Creating page {pagina} of {totale}: "
+                            f"link {origine} - {destinazione}"
+                        ),
+                    )
+
+                try:
+                    pdf_ridondanze = crea_pdf_relazione_ridondanze(
+                        ridondanze,
+                        grafo,
+                        progress_callback=aggiorna_progresso_pdf,
+                    )
+                except Exception as exc:
+                    st.session_state.pop("pdf_ridondanze_bytes", None)
+                    barra_pdf.empty()
+                    st.error(f"Unable to create the PDF redundancy report: {exc}")
+                else:
+                    st.session_state["pdf_ridondanze_bytes"] = pdf_ridondanze
+                    barra_pdf.progress(1.0, text="PDF report ready for download.")
+                    st.success("PDF report created successfully.")
+
+            pdf_ridondanze = st.session_state.get("pdf_ridondanze_bytes")
+            if pdf_ridondanze is not None:
+                st.download_button(
+                    "Download all redundancies as PDF",
+                    data=pdf_ridondanze,
+                    file_name="potentially_redundant_links_report.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    help=(
+                        "Downloads the report prepared for the current analysis, "
+                        "with one page for a single alternative path, otherwise two."
+                    ),
+                )
 
             selezione_rid = st.selectbox(
                 "Select a link to compare it with the indirect path",
