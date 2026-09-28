@@ -768,6 +768,146 @@ def riepiloga_nodi_percorsi(
     ])
 
 
+def _segmenti_si_incrocianno(a, b, c, d) -> bool:
+    """Rileva un incrocio interno tra segmenti, esclusi gli estremi."""
+    def orientamento(p1, p2, p3):
+        return (p2[0] - p1[0]) * (p3[1] - p1[1]) - (p2[1] - p1[1]) * (p3[0] - p1[0])
+    o1, o2 = orientamento(a, b, c), orientamento(a, b, d)
+    o3, o4 = orientamento(c, d, a), orientamento(c, d, b)
+    return o1 * o2 < -1e-9 and o3 * o4 < -1e-9
+
+def _conta_incroci_layout(posizioni, archi) -> int:
+    """Conta gli incroci tra archi che non condividono un nodo."""
+    validi = [(u, v) for u, v in archi if u in posizioni and v in posizioni]
+    totale = 0
+    for indice, (u1, v1) in enumerate(validi):
+        for u2, v2 in validi[indice + 1:]:
+            if {u1, v1} & {u2, v2}:
+                continue
+            totale += int(_segmenti_si_incrocianno(
+                posizioni[u1], posizioni[v1], posizioni[u2], posizioni[v2]
+            ))
+    return totale
+
+def _layout_dag_minimo_incroci(grafo, archi, origine, destinazione, spaziatura):
+    """Layout a livelli con sweep baricentrico e scambi locali anti-incrocio."""
+    generazioni = [list(g) for g in nx.topological_generations(grafo)]
+    livelli = {n: i for i, gen in enumerate(generazioni) for n in gen}
+    ordini = {i: sorted(gen, key=str) for i, gen in enumerate(generazioni)}
+
+    def baricentro(nodo, predecessori):
+        vicini = grafo.predecessors(nodo) if predecessori else grafo.successors(nodo)
+        indici = []
+        for vicino in vicini:
+            livello = livelli.get(vicino)
+            if livello is not None and vicino in ordini.get(livello, []):
+                indici.append(ordini[livello].index(vicino))
+        return sum(indici) / len(indici) if indici else float("inf")
+
+    # Sweep di tipo Sugiyama: riordina ogni livello rispetto ai livelli adiacenti.
+    for _ in range(8):
+        for livello in range(1, len(generazioni)):
+            ordini[livello].sort(key=lambda n: (baricentro(n, True), str(n)))
+        for livello in range(len(generazioni) - 2, -1, -1):
+            ordini[livello].sort(key=lambda n: (baricentro(n, False), str(n)))
+
+    passo_y = max(0.9, 1.15 + float(spaziatura))
+    def posizioni():
+        risultato = {}
+        for livello, nodi in ordini.items():
+            centro = (len(nodi) - 1) / 2
+            for indice, nodo in enumerate(nodi):
+                risultato[nodo] = (float(livello), (centro - indice) * passo_y)
+        risultato[origine] = (float(livelli.get(origine, 0)), 0.0)
+        risultato[destinazione] = (float(livelli.get(destinazione, len(generazioni)-1)), 0.0)
+        return risultato
+
+    migliore_pos = posizioni()
+    migliore = _conta_incroci_layout(migliore_pos, archi)
+    # Hill climbing deterministico su scambi adiacenti nello stesso livello.
+    for _ in range(20):
+        migliorato = False
+        for livello in range(1, max(len(generazioni) - 1, 1)):
+            nodi = ordini.get(livello, [])
+            for indice in range(len(nodi) - 1):
+                nodi[indice], nodi[indice + 1] = nodi[indice + 1], nodi[indice]
+                candidato = posizioni()
+                incroci = _conta_incroci_layout(candidato, archi)
+                if incroci < migliore:
+                    migliore_pos, migliore, migliorato = candidato, incroci, True
+                else:
+                    nodi[indice], nodi[indice + 1] = nodi[indice + 1], nodi[indice]
+        if not migliorato:
+            break
+
+    # Shift verticali locali: rompono gli allineamenti residui senza cambiare livello.
+    # Sono applicati anche ai livelli con un solo nodo intermedio e accettati solo
+    # quando non aumentano il numero di incroci del layout.
+    ampiezza_shift = max(0.18, min(0.75, 0.28 + float(spaziatura) * 0.32)) * passo_y
+    pos_shiftate = dict(migliore_pos)
+    intermedi = sorted(
+        (n for n in grafo.nodes if n not in {origine, destinazione}),
+        key=lambda n: (livelli.get(n, 0), str(n)),
+    )
+    for indice, nodo in enumerate(intermedi):
+        x, y_base = pos_shiftate[nodo]
+        livello = livelli.get(nodo, 0)
+        segno_preferito = 1.0 if (livello + indice) % 2 == 0 else -1.0
+        candidati_y = [
+            y_base + segno_preferito * ampiezza_shift,
+            y_base - segno_preferito * ampiezza_shift,
+            y_base + segno_preferito * ampiezza_shift * 0.55,
+            y_base - segno_preferito * ampiezza_shift * 0.55,
+        ]
+        migliore_y = y_base
+        migliore_locale = _conta_incroci_layout(pos_shiftate, archi)
+        for y_candidato in candidati_y:
+            candidato = dict(pos_shiftate)
+            candidato[nodo] = (x, y_candidato)
+            incroci = _conta_incroci_layout(candidato, archi)
+            if incroci < migliore_locale or (
+                incroci == migliore_locale
+                and abs(y_candidato - y_base) > abs(migliore_y - y_base)
+            ):
+                migliore_y = y_candidato
+                migliore_locale = incroci
+        pos_shiftate[nodo] = (x, migliore_y)
+
+    migliore_pos = pos_shiftate
+    migliore = _conta_incroci_layout(migliore_pos, archi)
+    return migliore_pos, migliore
+
+def _applica_shift_verticali_locali(
+    posizioni, grafo, archi, origine, destinazione, ampiezza
+):
+    """Sfalsa localmente i nodi senza cambiare ordine e corsie ottimizzati."""
+    if ampiezza <= 0:
+        return dict(posizioni)
+    risultato = dict(posizioni)
+    intermedi = sorted(
+        (n for n in risultato if n not in {origine, destinazione}),
+        key=lambda n: (risultato[n][0], risultato[n][1], str(n)),
+    )
+    for indice, nodo in enumerate(intermedi):
+        x, y = risultato[nodo]
+        predecessori = [p for p in grafo.predecessors(nodo) if (p, nodo) in archi]
+        successori = [v for v in grafo.successors(nodo) if (nodo, v) in archi]
+        # Shift pieno sui tratti orizzontali, ridotto negli altri casi.
+        allineato = any(
+            abs(risultato[v][1] - y) < 1e-9
+            for v in predecessori + successori
+            if v in risultato
+        )
+        verso = 1.0 if (int(round(x)) + indice) % 2 == 0 else -1.0
+        modulazione = 1.0 + 0.20 * (indice % 3)
+        fattore = 1.0 if allineato else 0.55
+        risultato[nodo] = (
+            x, y + verso * float(ampiezza) * modulazione * fattore
+        )
+    risultato[origine] = posizioni[origine]
+    risultato[destinazione] = posizioni[destinazione]
+    return risultato
+
 def crea_grafo_ridondanza(
     grafo: nx.DiGraph, origine: str, destinazione: str,
     percorsi: list[list[str]] | None = None,
@@ -784,98 +924,25 @@ def crea_grafo_ridondanza(
     }
     nodi_alternativi = {n for percorso in percorsi for n in percorso}
     sotto = grafo.subgraph(nodi_alternativi | {origine, destinazione}).copy()
-    # Layout deterministico a livelli e corsie.
-    # X segue il livello topologico; Y deriva dalla corsia dei percorsi che
-    # attraversano ciascun nodo. Non usa spring_layout e quindi evita calcoli
-    # iterativi o risultati instabili tra due rerun di Streamlit.
+    # Layout automatico a livelli con minimizzazione degli incroci.
     try:
-        generazioni = list(nx.topological_generations(sotto))
-        livello_nodo = {
-            nodo: livello
-            for livello, generazione in enumerate(generazioni)
-            for nodo in generazione
-        }
-
-        numero_percorsi = max(len(percorsi), 1)
-        corsie = {
-            indice: (numero_percorsi - 1) / 2 - indice
-            for indice in range(numero_percorsi)
-        }
-        corsie_nodo = defaultdict(list)
-        for indice, percorso in enumerate(percorsi):
-            for nodo in percorso:
-                corsie_nodo[nodo].append(corsie[indice])
-
-        pos = {}
-        for nodo in sotto.nodes:
-            valori = corsie_nodo.get(nodo, [0.0])
-            pos[nodo] = (
-                float(livello_nodo.get(nodo, 0)),
-                float(sum(valori) / len(valori)),
-            )
-
-        # Mantiene separati i nodi che appartengono allo stesso livello e che,
-        # dopo la media delle corsie, risulterebbero sovrapposti.
-        separazione_minima = 1.15
-        for generazione in generazioni:
-            ordinati = sorted(
-                generazione,
-                key=lambda nodo: (pos[nodo][1], str(nodo)),
-                reverse=True,
-            )
-            if len(ordinati) <= 1:
-                continue
-            valori_correnti = [pos[nodo][1] for nodo in ordinati]
-            centro = sum(valori_correnti) / len(valori_correnti)
-            for indice, nodo in enumerate(ordinati):
-                posizione_regolare = (
-                    (len(ordinati) - 1) / 2 - indice
-                ) * separazione_minima
-                pos[nodo] = (
-                    pos[nodo][0],
-                    centro + posizione_regolare,
-                )
-
-        # Applica uno sfalsamento verticale deterministico ai nodi intermedi.
-        # Anche quando una generazione contiene un solo nodo, la sequenza non
-        # resta perfettamente orizzontale: i legami risultano quindi distinguibili.
-        if shift_verticale > 0:
-            nodi_intermedi = sorted(
-                (n for n in sotto.nodes if n not in {origine, destinazione}),
-                key=lambda n: (livello_nodo.get(n, 0), str(n)),
-            )
-            for indice, nodo in enumerate(nodi_intermedi):
-                livello = int(livello_nodo.get(nodo, 0))
-                verso = 1.0 if (livello + indice) % 2 == 0 else -1.0
-                # Una piccola modulazione evita che diversi livelli ricadano
-                # sempre sulle stesse due ordinate.
-                modulazione = 1.0 + 0.30 * (livello % 3)
-                pos[nodo] = (
-                    pos[nodo][0],
-                    pos[nodo][1] + verso * shift_verticale * modulazione,
-                )
-
-        # Origine e destinazione restano centrate alle estremità del flusso.
-        pos[origine] = (float(livello_nodo.get(origine, 0)), 0.0)
-        pos[destinazione] = (
-            float(livello_nodo.get(
-                destinazione,
-                max(livello_nodo.values(), default=1),
-            )),
-            0.0,
+        pos, numero_incroci = _layout_dag_minimo_incroci(
+            sotto, archi_alternativi, origine, destinazione, 0.0
+        )
+        pos = _applica_shift_verticali_locali(
+            pos, sotto, archi_alternativi, origine, destinazione, shift_verticale
         )
     except Exception:
-        # Fallback anch'esso deterministico: disposizione per generazioni.
         generazioni = list(nx.topological_generations(sotto))
         pos = {}
         for livello, generazione in enumerate(generazioni):
             ordinati = sorted(generazione, key=str)
             centro = (len(ordinati) - 1) / 2
             for indice, nodo in enumerate(ordinati):
-                pos[nodo] = (
-                    float(livello),
-                    float(centro - indice),
-                )
+                pos[nodo] = (float(livello), float(centro - indice))
+        pos[origine] = (pos.get(origine, (0.0, 0.0))[0], 0.0)
+        pos[destinazione] = (pos.get(destinazione, (1.0, 0.0))[0], 0.0)
+        numero_incroci = _conta_incroci_layout(pos, archi_alternativi)
     fig = go.Figure()
     gruppi = [
         ("All indirect paths", "#2563eb", "solid", list(archi_alternativi)),
@@ -2350,15 +2417,15 @@ def main() -> None:
                     "relationship types, indirect paths, or the suspicious direct link."
                 )
                 shift_verticale_ridondanza = st.slider(
-                    "Vertical node shift",
+                    "Local vertical shift",
                     min_value=0.0,
                     max_value=1.5,
                     value=0.45,
                     step=0.05,
                     key="ridondanza_shift_verticale",
                     help=(
-                        "Offsets intermediate tasks on the Y axis to avoid "
-                        "perfect alignment and make overlapping links clearer."
+                        "Offsets intermediate tasks locally after lane ordering, "
+                        "reducing aligned links and overlapping task names."
                     ),
                 )
                 mostra_nomi_ridondanza = True
