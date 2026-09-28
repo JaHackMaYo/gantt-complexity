@@ -6,3 +6,5 @@ plotly
 aspose-tasks
 reportlab
 kaleido
+mpxj 
+JPype1
